@@ -1,6 +1,7 @@
-import { Box3, Mesh, type Object3D } from "three";
+import { Box3, Mesh, type MeshPhysicalMaterial, type Object3D } from "three";
 import { describe, expect, it, vi } from "vitest";
-import { CARD, createCard } from "./card";
+import { CARD, CLOUD_SHAPE, cloudRuns, createCard, pixelHorizon } from "./card";
+import { CHARACTER_PALETTE, CHARACTER_PIXELS } from "./character";
 
 function meshNamed(root: Object3D, name: string): Mesh {
   let found: Mesh | null = null;
@@ -108,6 +109,156 @@ describe("createCard", () => {
 
     expect(Math.sign(card.anchors.insertEdge.x)).toBe(Math.sign(card.anchors.chip.x));
     expect(Math.abs(card.anchors.insertEdge.x)).toBeCloseTo(CARD.width / 2, 5);
+
+    card.dispose();
+  });
+
+  it("cuts the horizon into flat runs, not a per-column staircase", () => {
+    // Steps are the whole look. A height that changes every column reads as a
+    // jagged line, not as pixel art.
+    const profile = pixelHorizon(112, 70, {
+      base: 0.58,
+      rise: 0.2,
+      step: 4,
+      jitter: 1,
+      seed: 0x51a2,
+    });
+
+    let changes = 0;
+    for (let i = 1; i < profile.length; i++) {
+      if (profile[i] !== profile[i - 1]) changes += 1;
+    }
+
+    // Far fewer transitions than columns means genuine blocks.
+    expect(changes).toBeGreaterThan(4);
+    expect(changes).toBeLessThan(profile.length / 3);
+  });
+
+  it("puts the valley in the middle and the hills at the edges", () => {
+    const rows = 70;
+    const profile = pixelHorizon(112, rows, {
+      base: 0.58,
+      rise: 0.2,
+      step: 4,
+      jitter: 0,
+      seed: 0x51a2,
+    });
+
+    const middle = profile[Math.floor(profile.length / 2)]!;
+    // Row 0 is the top, so a larger row index means lower on the card.
+    expect(middle).toBeGreaterThan(profile[0]!);
+    expect(middle).toBeGreaterThan(profile[profile.length - 1]!);
+    for (const row of profile) {
+      expect(row).toBeGreaterThanOrEqual(0);
+      expect(row).toBeLessThanOrEqual(rows);
+    }
+  });
+
+  it("builds clouds that are widest through the middle of the stack", () => {
+    // Stacked bars of equal width read as a brick. The taper is the cloud.
+    const runs = cloudRuns(24, 0x3f21);
+
+    expect(runs).toHaveLength(CLOUD_SHAPE.length);
+    const widest = runs.reduce((a, b) => (b.width > a.width ? b : a));
+    expect(widest.y).toBeGreaterThan(0);
+    expect(widest.y).toBeLessThan(runs.length - 1);
+  });
+
+  it("keeps clouds far wider than they are tall", () => {
+    // The reference clouds are flat streaks. A cloud as tall as it is wide
+    // reads as a lump sitting in the sky rather than drifting across it.
+    const runs = cloudRuns(24, 0x3f21);
+    const widest = runs.reduce((a, b) => (b.width > a.width ? b : a));
+
+    expect(widest.width / runs.length).toBeGreaterThan(3);
+  });
+
+  it("starts a cloud with a narrow bar above its body", () => {
+    const runs = cloudRuns(24, 0x8ad4);
+
+    expect(runs[0]!.width).toBeLessThan(runs[2]!.width * 0.6);
+  });
+
+  it("keeps every cloud run inside its own width", () => {
+    for (const seed of [0x3f21, 0x8ad4, 0x16bc]) {
+      for (const run of cloudRuns(24, seed)) {
+        expect(run.x).toBeGreaterThanOrEqual(0);
+        expect(run.width).toBeGreaterThanOrEqual(2);
+        expect(run.x + run.width).toBeLessThanOrEqual(24);
+      }
+    }
+  });
+
+  it("keeps the character sprite rectangular and inside its palette", () => {
+    // Generated from the source artwork, but a regeneration that went wrong
+    // would shear the figure or index colours that do not exist, and both
+    // fail silently at draw time.
+    const width = CHARACTER_PIXELS[0]!.length;
+    expect(width).toBeGreaterThan(16);
+    expect(CHARACTER_PIXELS.length).toBeGreaterThan(width);
+    for (const row of CHARACTER_PIXELS) expect(row).toHaveLength(width);
+
+    const chars = "0123456789abcdefghijklmnopqrstuvwxyz";
+    for (const row of CHARACTER_PIXELS) {
+      for (const ch of row) {
+        if (ch === ".") continue;
+        const index = chars.indexOf(ch);
+        expect(index).toBeGreaterThanOrEqual(0);
+        expect(CHARACTER_PALETTE[index]).toBeDefined();
+      }
+    }
+  });
+
+  it("uses every colour it declares", () => {
+    const used = new Set<string>();
+    for (const row of CHARACTER_PIXELS) {
+      for (const ch of row) if (ch !== ".") used.add(ch);
+    }
+    expect(used.size).toBe(CHARACTER_PALETTE.length);
+    for (const hex of CHARACTER_PALETTE) expect(hex).toMatch(/^#[0-9a-f]{6}$/);
+  });
+
+  it("prints a different face on the back than the front", () => {
+    const card = createCard();
+
+    const front = meshNamed(card.group, "front").material as MeshPhysicalMaterial;
+    const back = meshNamed(card.group, "back").material as MeshPhysicalMaterial;
+
+    // Separate materials on separate meshes is the fix; sharing one is what
+    // put the front's artwork on the back. Their maps cannot be compared
+    // here — with no DOM the art is never generated and both are null — so
+    // this checks identity and the colours they fall back to.
+    expect(front).not.toBe(back);
+    expect(front.color.getHex()).not.toBe(back.color.getHex());
+
+    card.dispose();
+  });
+
+  it("keeps the printed faces inside the card's outline", () => {
+    // The extruded substrate's cap is narrower than its nominal width, so a
+    // face cut to the full size overhangs the rounded edge and the artwork
+    // appears to wrap around the side of the card.
+    const card = createCard();
+
+    const body = new Box3().setFromObject(meshNamed(card.group, "body"));
+    for (const name of ["front", "back"]) {
+      const plate = new Box3().setFromObject(meshNamed(card.group, name));
+      expect(plate.min.x).toBeGreaterThan(body.min.x);
+      expect(plate.max.x).toBeLessThan(body.max.x);
+      expect(plate.min.y).toBeGreaterThan(body.min.y);
+      expect(plate.max.y).toBeLessThan(body.max.y);
+    }
+
+    card.dispose();
+  });
+
+  it("keeps the printed faces outside the substrate, on both sides", () => {
+    const card = createCard();
+
+    const front = meshNamed(card.group, "front");
+    const back = meshNamed(card.group, "back");
+    expect(front.position.z).toBeGreaterThanOrEqual(CARD.thickness / 2);
+    expect(back.position.z).toBeLessThanOrEqual(-CARD.thickness / 2);
 
     card.dispose();
   });

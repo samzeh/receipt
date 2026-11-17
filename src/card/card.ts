@@ -1,8 +1,10 @@
 import {
-  BufferAttribute, type BufferGeometry, CanvasTexture, DataTexture, ExtrudeGeometry, Group, LinearFilter,
+  BufferAttribute, type BufferGeometry, CanvasTexture, DataTexture, ExtrudeGeometry, Group,
+  LinearFilter, LinearMipmapLinearFilter, NearestFilter, ShapeGeometry,
   type Material, Mesh, MeshPhysicalMaterial, RepeatWrapping, RGBAFormat, Shape,
   SRGBColorSpace, type Texture, Vector2, Vector3,
 } from "three";
+import { CHARACTER_PALETTE, CHARACTER_PIXELS } from "./character";
 import { mulberry32 } from "../text/rng";
 
 /**
@@ -33,6 +35,12 @@ export const CARD = {
   /** Chips stand very slightly proud of the card face. */
   chipProud: 0.00004,
 } as const;
+
+/**
+ * How far the printed faces sit inside the card's outline. Must clear the
+ * edge roundover of the substrate beneath them, or the faces overhang it.
+ */
+const FACE_INSET = 0.00016;
 
 export interface CardAnchors {
   /** Centre of the contact plate, on the card's front face. */
@@ -106,6 +114,198 @@ function planarUV(g: BufferGeometry, w: number, h: number): void {
     uv[i * 2 + 1] = position.getY(i) / h + 0.5;
   }
   g.setAttribute("uv", new BufferAttribute(uv, 2));
+}
+
+export interface HorizonBand {
+  /** Where the band's top sits, as a fraction of height. */
+  base: number;
+  /** How far it climbs toward the edges of the card. */
+  rise: number;
+  /** Minimum width of a flat run, in pixels. Steps are what make it read as
+   *  pixel art rather than as a jagged line. */
+  step: number;
+  /** Random vertical wobble between runs, in pixels. */
+  jitter: number;
+  seed: number;
+}
+
+/**
+ * The top edge of one band of hills, as a row index per column.
+ *
+ * Pure, so the shape of the landscape is testable without a canvas. Heights
+ * are held constant across runs of several columns: a per-column curve gives
+ * a staircase of single pixels, which reads as a jagged line rather than as
+ * blocks.
+ */
+export function pixelHorizon(cols: number, rows: number, band: HorizonBand): Int32Array {
+  const profile = new Int32Array(cols);
+  const rand = mulberry32(band.seed);
+  let c = 0;
+  while (c < cols) {
+    const run = band.step + Math.floor(rand() * 3);
+    // Valley through the middle, climbing at both edges.
+    const t = (c / Math.max(1, cols - 1)) * 2 - 1;
+    const wobble = Math.round((rand() - 0.5) * 2 * band.jitter);
+    const row = Math.round(rows * (band.base - band.rise * t * t)) + wobble;
+    const clamped = Math.max(0, Math.min(rows, row));
+    for (let i = c; i < Math.min(cols, c + run); i++) profile[i] = clamped;
+    c += run;
+  }
+  return profile;
+}
+
+export interface CloudRun {
+  x: number;
+  y: number;
+  width: number;
+}
+
+/**
+ * Width of each bar as a fraction of the cloud's own width.
+ *
+ * A narrow bar on top, a wide body, a tapered underside — four bars for a
+ * cloud three or four times as wide as it is tall. Six bars of similar width
+ * makes a lump; this is what makes it drift.
+ */
+export const CLOUD_SHAPE: readonly number[] = [0.38, 0.9, 1, 0.68];
+
+/**
+ * One cloud, as a stack of horizontal runs.
+ *
+ * Pure, so the shape is testable without a canvas.
+ */
+export function cloudRuns(width: number, seed: number, shape = CLOUD_SHAPE): CloudRun[] {
+  const rand = mulberry32(seed);
+  return shape.map((fraction, r) => {
+    const w = Math.max(2, Math.round(width * fraction * (0.86 + rand() * 0.14)));
+    const x = Math.round((width - w) * rand());
+    return { x, y: r, width: w };
+  });
+}
+
+/**
+ * Clouds, in coarse blocks. They are painted before the hills and before the
+ * character, so one may sit behind the figure — which is what puts the
+ * character in the scene rather than on top of it.
+ */
+const CLOUDS = [
+  { x: 2, y: 3, width: 17, seed: 0x3f21 },
+  { x: 24, y: 6, width: 15, seed: 0x8ad4 },
+  { x: 36, y: 1, width: 12, seed: 0x16bc },
+] as const;
+
+/**
+ * The landscape is painted in 2x2 blocks while the character is painted at
+ * one pixel each.
+ *
+ * They are drawn at different pixel sizes on purpose: the hills want blocks
+ * about a fiftieth of the card wide, and a face with eyes and eyebrows cannot
+ * be drawn at that size. One grid for both means either a blocky landscape
+ * and no character, or a readable character and a landscape that stops
+ * looking like pixel art.
+ */
+const BLOCK = 3;
+
+/**
+ * Where the character stands, in fine pixels. Positioned to match the source
+ * artwork: a tenth of the way in from the left, feet in the grass.
+ */
+const CHARACTER_AT = { x: 13, y: 16 } as const;
+
+const CLOUD_BODY = "#f1f6fd";
+/** The underside and the ends, a touch bluer than the body. */
+const CLOUD_EDGE = "#d7e6f7";
+
+/** Sky and hills, in the order they are painted: highest band first. */
+const LANDSCAPE = {
+  sky: "#86d0fb",
+  bands: [
+    { color: "#80c74a", base: 0.76, rise: 0.11, step: 3, jitter: 1, seed: 0x51a2 },
+    { color: "#6fb83c", base: 0.87, rise: 0.07, step: 3, jitter: 1, seed: 0x7c3e },
+    { color: "#5aa130", base: 0.94, rise: 0.04, step: 4, jitter: 1, seed: 0x2d91 },
+  ] as HorizonBand[] & { color: string }[],
+} as const;
+
+/**
+ * The card's face: a pixel-art landscape.
+ *
+ * Drawn at one canvas pixel per art pixel and magnified with a nearest
+ * filter, so the blocks stay hard-edged however close the camera gets.
+ * Drawing it large and downscaling would antialias away the entire point.
+ */
+export function makeFaceTexture(
+  withCharacter = true,
+  cols = 150,
+  rows = 96,
+): Texture | null {
+  if (typeof document === "undefined") return null;
+  const canvas = document.createElement("canvas");
+  canvas.width = cols;
+  canvas.height = rows;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return null;
+  ctx.imageSmoothingEnabled = false;
+
+  const coarseCols = Math.floor(cols / BLOCK);
+  const coarseRows = Math.floor(rows / BLOCK);
+  /** Paints one coarse block. */
+  const block = (x: number, y: number, w: number, h: number): void =>
+    ctx.fillRect(x * BLOCK, y * BLOCK, w * BLOCK, h * BLOCK);
+
+  ctx.fillStyle = LANDSCAPE.sky;
+  ctx.fillRect(0, 0, cols, rows);
+
+  // Clouds go on before the hills, so a hill would occlude one rather than
+  // the other way round.
+  for (const cloud of CLOUDS) {
+    const runs = cloudRuns(cloud.width, cloud.seed);
+    runs.forEach((run, i) => {
+      // The lowest run is the shaded underside.
+      ctx.fillStyle = i === runs.length - 1 ? CLOUD_EDGE : CLOUD_BODY;
+      block(cloud.x + run.x, cloud.y + run.y, run.width, 1);
+      // Tint both ends, so each bar has a defined edge instead of stopping.
+      ctx.fillStyle = CLOUD_EDGE;
+      block(cloud.x + run.x, cloud.y + run.y, 1, 1);
+      block(cloud.x + run.x + run.width - 1, cloud.y + run.y, 1, 1);
+    });
+  }
+
+  for (const band of LANDSCAPE.bands) {
+    const profile = pixelHorizon(coarseCols, coarseRows, band);
+    ctx.fillStyle = band.color;
+    for (let x = 0; x < coarseCols; x++) {
+      const top = profile[x]!;
+      if (top >= coarseRows) continue;
+      // Down to the canvas edge rather than to the last whole block: when
+      // rows is not a multiple of BLOCK the remainder is left as sky, which
+      // shows as a strip of blue under the grass.
+      ctx.fillRect(x * BLOCK, top * BLOCK, BLOCK, rows - top * BLOCK);
+    }
+  }
+
+  // The character last, so it stands in front of the hills.
+  if (withCharacter) {
+    const CHARS = "0123456789abcdefghijklmnopqrstuvwxyz";
+    CHARACTER_PIXELS.forEach((line, row) => {
+      for (let col = 0; col < line.length; col++) {
+        const colour = CHARACTER_PALETTE[CHARS.indexOf(line[col]!)];
+        if (!colour) continue;
+        ctx.fillStyle = colour;
+        ctx.fillRect(CHARACTER_AT.x + col, CHARACTER_AT.y + row, 1, 1);
+      }
+    });
+  }
+
+  const t = new CanvasTexture(canvas);
+  t.colorSpace = SRGBColorSpace;
+  // Hard pixels on magnification; mipmaps still handle minification, so the
+  // card does not shimmer when it is small or steeply tilted.
+  t.magFilter = NearestFilter;
+  t.minFilter = LinearMipmapLinearFilter;
+  t.generateMipmaps = true;
+  t.anisotropy = 4;
+  t.needsUpdate = true;
+  return t;
 }
 
 /**
@@ -310,20 +510,34 @@ export function createCard(): Card {
   group.name = "card";
 
   const brushed = makeBrushedNormalMap();
-  // Matte metal: a card you would actually hold, not a mirror. The chip is
-  // the only polished thing on it, and that contrast is the point — a
-  // reflective plate on a satin card reads as a component set into metal.
-  const bodyMat = new MeshPhysicalMaterial({
-    color: 0x2c2f34,
-    metalness: 1,
-    roughness: 0.46,
-    normalMap: brushed,
-    // Scratches run across the card, so the highlight stretches along it.
-    normalScale: new Vector2(0.32, 0.32),
-    clearcoat: 0.3,
-    clearcoatRoughness: 0.38,
-    envMapIntensity: 0.8,
-  });
+  // A printed card under lacquer, not bare metal. On a metal a colour map is
+  // reflectance tint, so artwork would render as tinted chrome rather than as
+  // print; the ink has to sit on a dielectric. The clearcoat is the laminate,
+  // and it is what keeps the chip reading as the one metal thing on the card.
+  const printed = (map: Texture | null, fallback: number): MeshPhysicalMaterial =>
+    new MeshPhysicalMaterial({
+      color: map ? 0xffffff : fallback,
+      map,
+      metalness: 0.12,
+      roughness: 0.4,
+      normalMap: brushed,
+      // Very faint: a strong micro-normal smears the pixel edges, which is
+      // the one thing this artwork cannot survive.
+      normalScale: new Vector2(0.06, 0.06),
+      clearcoat: 0.6,
+      clearcoatRoughness: 0.1,
+      envMapIntensity: 1,
+    });
+
+  // Same landscape on both sides; the character is on the front only.
+  const face = makeFaceTexture(true);
+  const backFace = makeFaceTexture(false);
+
+  // The substrate carries the front artwork too, so the card's edge is
+  // printed rather than a dark rim. planarUV puts the side walls on the
+  // texture's perimeter, so the edge is sky along the top and grass along the
+  // bottom on its own — which is what an edge-printed card looks like.
+  const bodyMat = printed(face, 0x2c2f34);
 
   const body = new Mesh(
     plateGeometry(CARD.width, CARD.height, CARD.cornerRadius, CARD.thickness),
@@ -333,6 +547,38 @@ export function createCard(): Card {
   body.castShadow = true;
   body.receiveShadow = true;
   group.add(body);
+
+  // Front and back are separate meshes. An extruded plate puts both caps in
+  // one geometry group, so a single mesh cannot carry different art on each
+  // side — which is why the back was showing the front's design.
+  const frontMat = printed(face, 0x2c2f34);
+  const backMat = printed(backFace, 0x232830);
+
+  // Inset past the substrate's edge roundover. The extruded plate's cap is
+  // narrower than its full width — the full width exists only at mid
+  // thickness — so a face plate cut to the card's nominal size overhangs the
+  // rounded edge, and that lip reads as the artwork wrapping around the side.
+  const inset = FACE_INSET;
+  const facePlate = (): BufferGeometry => {
+    const w = CARD.width - 2 * inset;
+    const h = CARD.height - 2 * inset;
+    const g = new ShapeGeometry(roundedRect(w, h, CARD.cornerRadius - inset), 24);
+    // UVs still span the card's full size, so the art stays registered to the
+    // card rather than being scaled up into the inset.
+    planarUV(g, w, h);
+    return g;
+  };
+
+  const front = new Mesh(facePlate(), frontMat);
+  front.name = "front";
+  front.position.z = CARD.thickness / 2 + 2e-6;
+  group.add(front);
+
+  const back = new Mesh(facePlate(), backMat);
+  back.name = "back";
+  back.position.z = -CARD.thickness / 2 - 2e-6;
+  back.rotation.y = Math.PI;
+  group.add(back);
 
   const chipMaps = makeChipMaps();
   // Bare plated metal, deliberately a different surface from the card's.
@@ -387,6 +633,8 @@ export function createCard(): Card {
       });
       for (const g of geometries) g.dispose();
       brushed.dispose();
+      face?.dispose();
+      backFace?.dispose();
       chipMaps?.map.dispose();
       chipMaps?.roughnessMap.dispose();
       for (const m of materials) m.dispose();
