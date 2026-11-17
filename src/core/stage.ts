@@ -1,8 +1,8 @@
 import {
-  ACESFilmicToneMapping, EquirectangularReflectionMapping, PCFSoftShadowMap,
+  ACESFilmicToneMapping, Color, EquirectangularReflectionMapping, PCFSoftShadowMap,
   PMREMGenerator, Scene, WebGLRenderer,
 } from "three";
-import { createStudio, type Studio } from "../scene/studio";
+import { createStudio, type Studio, type StudioMode } from "../scene/studio";
 
 /**
  * The renderer, the scene, and the fixed-step loop — everything a three.js
@@ -61,6 +61,11 @@ export interface StageOptions {
   shadows?: boolean;
   /** ACES exposure. Raise it if the grade comes out dark. */
   exposure?: number;
+  /** Lighting preset. "dark" is the receipt's void; "light" is a product
+   *  sweep for objects on an off-white backdrop. */
+  studio?: StudioMode;
+  /** Solid scene background. Omit to leave the canvas transparent. */
+  background?: number;
 }
 
 export interface StageHooks {
@@ -112,7 +117,8 @@ export function createStage(
   }
 
   const scene = new Scene();
-  const studio = createStudio(width / height);
+  const studio = createStudio(width / height, options.studio);
+  if (options.background !== undefined) scene.background = new Color(options.background);
   for (const light of studio.lights) scene.add(light);
 
   renderer.setPixelRatio(Math.min(2, globalThis.devicePixelRatio ?? 1));

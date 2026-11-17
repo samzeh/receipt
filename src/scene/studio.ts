@@ -3,6 +3,13 @@ import {
   type Object3D, PerspectiveCamera, RGBAFormat,
 } from "three";
 
+/**
+ * "dark" is the receipt's void: a near-black room where a translucent sheet
+ * glows. "light" is a product sweep for objects shot on an off-white
+ * backdrop, where the background itself is most of the light.
+ */
+export type StudioMode = "dark" | "light";
+
 export interface Studio {
   camera: PerspectiveCamera;
   lights: Object3D[];
@@ -54,45 +61,55 @@ function addSource(
  * PMREM conversion needs a live renderer, so that happens in the stage and
  * this stays headlessly testable.
  */
-function studioEnvironment(w = 128, h = 64): DataTexture {
+function studioEnvironment(mode: StudioMode, w = 128, h = 64): DataTexture {
+  const light = mode === "light";
+  // Sky and floor levels. On a sweep the backdrop IS the light source, so the
+  // whole dome sits near white and the softboxes only shape it.
+  const sky = light ? 0.95 : 0.112;
+  const floor = light ? 0.42 : 0.012;
+
   const data = new Float32Array(w * h * 4);
   for (let y = 0; y < h; y++) {
     // Darker toward the floor, so there is a horizon for edges to catch.
     const t = y / (h - 1);
-    const v = 0.012 + (1 - t) ** 1.6 * 0.1;
+    const v = floor + (1 - t) ** 1.6 * (sky - floor);
     for (let x = 0; x < w; x++) {
       const i = (y * w + x) * 4;
       data[i] = v;
-      data[i + 1] = v * 0.98;
-      data[i + 2] = v * 0.95;
+      data[i + 1] = v * (light ? 0.995 : 0.98);
+      data[i + 2] = v * (light ? 0.985 : 0.95);
       data[i + 3] = 1;
     }
   }
 
+  const gain = light ? 1.9 : 1;
   // Large warm key softbox, high and to the left of frame.
-  addSource(data, w, h, w * 0.3, h * 0.2, w * 0.17, h * 0.17, 3.4, [1, 0.96, 0.9]);
-  // Narrow cool strip behind, for the long highlight down the crown.
-  addSource(data, w, h, w * 0.82, h * 0.26, w * 0.05, h * 0.2, 2.2, [0.86, 0.92, 1]);
-  // Dim floor bounce, so the underside is not black.
-  addSource(data, w, h, w * 0.45, h * 0.84, w * 0.3, h * 0.14, 0.35, [0.95, 0.95, 1]);
+  addSource(data, w, h, w * 0.3, h * 0.2, w * 0.17, h * 0.17, 3.4 * gain, [1, 0.96, 0.9]);
+  // Narrow cool strip behind, for a long highlight down a hard edge.
+  addSource(data, w, h, w * 0.82, h * 0.26, w * 0.05, h * 0.2, 2.2 * gain, [0.86, 0.92, 1]);
+  // Floor bounce, so undersides are not black.
+  addSource(data, w, h, w * 0.45, h * 0.84, w * 0.3, h * 0.14, light ? 1.2 : 0.35, [0.95, 0.95, 1]);
 
   const t = new DataTexture(data, w, h, RGBAFormat, FloatType);
   t.needsUpdate = true;
   return t;
 }
 
-export function createStudio(aspect: number): Studio {
+export function createStudio(aspect: number, mode: StudioMode = "dark"): Studio {
+  const light = mode === "light";
   const camera = new PerspectiveCamera(32, aspect, 0.01, 10);
   camera.position.set(0.04, -0.18, 0.42);
   camera.lookAt(0.04, -0.18, 0);
 
-  const key = new DirectionalLight(0xfff6ea, 3.2);
+  // On a sweep most of the illumination comes from the environment, so the
+  // lamps are there to place highlights and a shadow, not to do the lifting.
+  const key = new DirectionalLight(0xfff6ea, light ? 2.1 : 3.2);
   key.position.set(-0.3, 0.4, 0.5);
-  const rim = new DirectionalLight(0xdfe8ff, 1.6);
+  const rim = new DirectionalLight(0xdfe8ff, light ? 0.9 : 1.6);
   rim.position.set(0.5, -0.1, -0.45);
-  const fill = new AmbientLight(0x404858, 0.35);
+  const fill = new AmbientLight(light ? 0xdfe3ea : 0x404858, light ? 0.5 : 0.35);
 
-  return { camera, lights: [key, rim, fill], key, rim, environment: studioEnvironment() };
+  return { camera, lights: [key, rim, fill], key, rim, environment: studioEnvironment(mode) };
 }
 
 /**

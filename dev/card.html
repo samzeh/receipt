@@ -1,0 +1,15 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>card — dev</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #f2f0ec; overflow: hidden; }
+  #stage { position: fixed; inset: 0; }
+  #hud {
+    position: fixed; left: 12px; top: 12px; margin: 0; z-index: 10;
+    font: 11px ui-monospace, monospace; color: #6b6a66;
+    background: rgba(255,255,255,0.6); padding: 8px 10px; border-radius: 6px;
+    pointer-events: none; white-space: pre;
+  }
+</style>
+<div id="stage"></div>
+<script type="module" src="./card.ts"></script>
