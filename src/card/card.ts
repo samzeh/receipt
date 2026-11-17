@@ -54,6 +54,11 @@ export interface CardAnchors {
 export interface Card {
   group: Group;
   anchors: CardAnchors;
+  /**
+   * Cross-fades between the display face and the playfield: 0 is the card you
+   * look at, 1 is the card you play on. The chip fades out as it goes.
+   */
+  setGameMix(t: number): void;
   dispose(): void;
 }
 
@@ -183,61 +188,129 @@ export function cloudRuns(width: number, seed: number, shape = CLOUD_SHAPE): Clo
   });
 }
 
-/**
- * Clouds, in coarse blocks. They are painted before the hills and before the
- * character, so one may sit behind the figure — which is what puts the
- * character in the scene rather than on top of it.
- */
-const CLOUDS = [
-  { x: 2, y: 3, width: 17, seed: 0x3f21 },
-  { x: 24, y: 6, width: 15, seed: 0x8ad4 },
-  { x: 36, y: 1, width: 12, seed: 0x16bc },
-] as const;
-
-/**
- * The landscape is painted in 2x2 blocks while the character is painted at
- * one pixel each.
- *
- * They are drawn at different pixel sizes on purpose: the hills want blocks
- * about a fiftieth of the card wide, and a face with eyes and eyebrows cannot
- * be drawn at that size. One grid for both means either a blocky landscape
- * and no character, or a readable character and a landscape that stops
- * looking like pixel art.
- */
-const BLOCK = 3;
-
-/**
- * Where the character stands, in fine pixels. Positioned to match the source
- * artwork: a tenth of the way in from the left, feet in the grass.
- */
-const CHARACTER_AT = { x: 13, y: 16 } as const;
+/** Sky, and the hills in the order they are painted: highest band first. */
+const LANDSCAPE = {
+  sky: "#86d0fb",
+  bands: [
+    // No jitter: a random nudge per run is noise sitting on top of the hill
+    // curve, and at these run lengths it steps up and down every few blocks
+    // and reads as a saw rather than as terrain. The curve alone gives the
+    // shape; the run lengths give it its steps.
+    { color: "#80c74a", base: 0.76, rise: 0.11, step: 5, jitter: 0, seed: 0x51a2 },
+    { color: "#6fb83c", base: 0.87, rise: 0.07, step: 6, jitter: 0, seed: 0x7c3e },
+    { color: "#5aa130", base: 0.94, rise: 0.04, step: 7, jitter: 0, seed: 0x2d91 },
+  ] as (HorizonBand & { color: string })[],
+} as const;
 
 const CLOUD_BODY = "#f1f6fd";
 /** The underside and the ends, a touch bluer than the body. */
 const CLOUD_EDGE = "#d7e6f7";
 
-/** Sky and hills, in the order they are painted: highest band first. */
-const LANDSCAPE = {
-  sky: "#86d0fb",
-  bands: [
-    { color: "#80c74a", base: 0.76, rise: 0.11, step: 3, jitter: 1, seed: 0x51a2 },
-    { color: "#6fb83c", base: 0.87, rise: 0.07, step: 3, jitter: 1, seed: 0x7c3e },
-    { color: "#5aa130", base: 0.94, rise: 0.04, step: 4, jitter: 1, seed: 0x2d91 },
-  ] as HorizonBand[] & { color: string }[],
-} as const;
+/**
+ * How the card's face is laid out.
+ *
+ * Two of these, and every field between them is interpolated, so going into
+ * the game is a move you watch rather than a cut you miss.
+ *
+ * `block` is deliberately the same in both. A block size part way between two
+ * integers lands every edge on a fractional pixel and blurs it, and with the
+ * column count fixed the hill profile simply translates as the horizon drops
+ * instead of reshuffling into a different set of steps.
+ */
+export interface FaceLayout {
+  /** Pixel size of a landscape block. Shared by both layouts. */
+  block: number;
+  /** Pixel size of one of the character's pixels. */
+  characterScale: number;
+  /** Top-left of the character, in texture pixels. */
+  characterAt: { x: number; y: number };
+  /** Top of each hill band, as a fraction of height. */
+  bases: readonly [number, number, number];
+  /**
+   * How far each band climbs toward the edges, as a fraction of height.
+   * Has to shrink with the bands: a climb taller than the strip itself puts
+   * hills over the horizon rather than undulations in it.
+   */
+  rises: readonly [number, number, number];
+  /** Clouds, in texture pixels. */
+  clouds: readonly { x: number; y: number; width: number; seed: number }[];
+}
+
+/** The card at rest: big scene, character front and centre. */
+export const DISPLAY_LAYOUT: FaceLayout = {
+  block: 6,
+  characterScale: 2,
+  characterAt: { x: 26, y: 32 },
+  bases: [0.76, 0.87, 0.94],
+  rises: [0.11, 0.07, 0.04],
+  clouds: [
+    { x: 12, y: 18, width: 102, seed: 0x3f21 },
+    { x: 144, y: 36, width: 90, seed: 0x8ad4 },
+    { x: 216, y: 6, width: 72, seed: 0x16bc },
+  ],
+};
 
 /**
- * The card's face: a pixel-art landscape.
- *
- * Drawn at one canvas pixel per art pixel and magnified with a nearest
- * filter, so the blocks stay hard-edged however close the camera gets.
- * Drawing it large and downscaling would antialias away the entire point.
+ * The card as a playfield: the scene pulls back, the horizon drops to a strip
+ * and the sky opens up for things to jump over.
  */
-export function makeFaceTexture(
+export const GAME_LAYOUT: FaceLayout = {
+  block: 6,
+  characterScale: 1,
+  characterAt: { x: 36, y: 111 },
+  bases: [0.93, 0.965, 0.99],
+  rises: [0.018, 0.011, 0.005],
+  clouds: [
+    { x: 24, y: 30, width: 56, seed: 0x3f21 },
+    { x: 150, y: 46, width: 46, seed: 0x8ad4 },
+    { x: 232, y: 16, width: 40, seed: 0x16bc },
+  ],
+};
+
+/** Blends two layouts. Every visible quantity moves; nothing cross-fades. */
+export function lerpLayout(a: FaceLayout, b: FaceLayout, t: number): FaceLayout {
+  const k = Math.max(0, Math.min(1, t));
+  const mix = (x: number, y: number): number => x + (y - x) * k;
+  return {
+    block: a.block,
+    characterScale: mix(a.characterScale, b.characterScale),
+    characterAt: {
+      x: mix(a.characterAt.x, b.characterAt.x),
+      y: mix(a.characterAt.y, b.characterAt.y),
+    },
+    bases: [
+      mix(a.bases[0], b.bases[0]),
+      mix(a.bases[1], b.bases[1]),
+      mix(a.bases[2], b.bases[2]),
+    ],
+    rises: [
+      mix(a.rises[0], b.rises[0]),
+      mix(a.rises[1], b.rises[1]),
+      mix(a.rises[2], b.rises[2]),
+    ],
+    clouds: a.clouds.map((cloud, i) => {
+      const to = b.clouds[i] ?? cloud;
+      return {
+        x: mix(cloud.x, to.x),
+        y: mix(cloud.y, to.y),
+        width: mix(cloud.width, to.width),
+        seed: cloud.seed,
+      };
+    }),
+  };
+}
+
+export interface Face {
+  texture: Texture;
+  /** Redraws the face at a layout. Cheap enough to run every frame. */
+  draw(layout: FaceLayout): void;
+}
+
+export function makeFace(
   withCharacter = true,
-  cols = 150,
-  rows = 96,
-): Texture | null {
+  cols = 300,
+  rows = 192,
+): Face | null {
   if (typeof document === "undefined") return null;
   const canvas = document.createElement("canvas");
   canvas.width = cols;
@@ -246,32 +319,42 @@ export function makeFaceTexture(
   if (!ctx) return null;
   ctx.imageSmoothingEnabled = false;
 
-  const coarseCols = Math.floor(cols / BLOCK);
-  const coarseRows = Math.floor(rows / BLOCK);
-  /** Paints one coarse block. */
-  const block = (x: number, y: number, w: number, h: number): void =>
-    ctx.fillRect(x * BLOCK, y * BLOCK, w * BLOCK, h * BLOCK);
+  const paint = (layout: FaceLayout): void => {
 
+  const unit = layout.block;
+  const coarseCols = Math.floor(cols / unit);
+  const coarseRows = Math.floor(rows / unit);
   ctx.fillStyle = LANDSCAPE.sky;
   ctx.fillRect(0, 0, cols, rows);
 
   // Clouds go on before the hills, so a hill would occlude one rather than
   // the other way round.
-  for (const cloud of CLOUDS) {
-    const runs = cloudRuns(cloud.width, cloud.seed);
+  for (const cloud of layout.clouds) {
+    // Bars are laid out in blocks, then placed in pixels, so a cloud can move
+    // and shrink continuously while its bars stay hard-edged. Rounding is
+    // what keeps the edges crisp part way through the move.
+    const bars = Math.max(2, Math.round(cloud.width / unit));
+    const runs = cloudRuns(bars, cloud.seed);
+    const px = (v: number): number => Math.round(v);
     runs.forEach((run, i) => {
-      // The lowest run is the shaded underside.
+      const x = cloud.x + run.x * unit;
+      const y = cloud.y + run.y * unit;
+      const w = run.width * unit;
       ctx.fillStyle = i === runs.length - 1 ? CLOUD_EDGE : CLOUD_BODY;
-      block(cloud.x + run.x, cloud.y + run.y, run.width, 1);
+      ctx.fillRect(px(x), px(y), px(x + w) - px(x), px(y + unit) - px(y));
       // Tint both ends, so each bar has a defined edge instead of stopping.
       ctx.fillStyle = CLOUD_EDGE;
-      block(cloud.x + run.x, cloud.y + run.y, 1, 1);
-      block(cloud.x + run.x + run.width - 1, cloud.y + run.y, 1, 1);
+      ctx.fillRect(px(x), px(y), unit, px(y + unit) - px(y));
+      ctx.fillRect(px(x + w - unit), px(y), unit, px(y + unit) - px(y));
     });
   }
 
-  for (const band of LANDSCAPE.bands) {
-    const profile = pixelHorizon(coarseCols, coarseRows, band);
+  LANDSCAPE.bands.forEach((band, i) => {
+    const profile = pixelHorizon(coarseCols, coarseRows, {
+      ...band,
+      base: layout.bases[i]!,
+      rise: layout.rises[i]!,
+    });
     ctx.fillStyle = band.color;
     for (let x = 0; x < coarseCols; x++) {
       const top = profile[x]!;
@@ -279,9 +362,9 @@ export function makeFaceTexture(
       // Down to the canvas edge rather than to the last whole block: when
       // rows is not a multiple of BLOCK the remainder is left as sky, which
       // shows as a strip of blue under the grass.
-      ctx.fillRect(x * BLOCK, top * BLOCK, BLOCK, rows - top * BLOCK);
+      ctx.fillRect(x * unit, top * unit, unit, rows - top * unit);
     }
-  }
+  });
 
   // The character last, so it stands in front of the hills.
   if (withCharacter) {
@@ -291,21 +374,40 @@ export function makeFaceTexture(
         const colour = CHARACTER_PALETTE[CHARS.indexOf(line[col]!)];
         if (!colour) continue;
         ctx.fillStyle = colour;
-        ctx.fillRect(CHARACTER_AT.x + col, CHARACTER_AT.y + row, 1, 1);
+        // Each pixel's bounds are rounded independently, so neighbours stay
+        // flush at any scale and the sprite shrinks in whole-pixel steps
+        // rather than going soft.
+        const k = layout.characterScale;
+        const x0 = Math.round(layout.characterAt.x + col * k);
+        const x1 = Math.round(layout.characterAt.x + (col + 1) * k);
+        const y0 = Math.round(layout.characterAt.y + row * k);
+        const y1 = Math.round(layout.characterAt.y + (row + 1) * k);
+        ctx.fillRect(x0, y0, Math.max(1, x1 - x0), Math.max(1, y1 - y0));
       }
     });
   }
 
-  const t = new CanvasTexture(canvas);
-  t.colorSpace = SRGBColorSpace;
+  };
+
+  paint(DISPLAY_LAYOUT);
+
+  const map = new CanvasTexture(canvas);
+  map.colorSpace = SRGBColorSpace;
   // Hard pixels on magnification; mipmaps still handle minification, so the
   // card does not shimmer when it is small or steeply tilted.
-  t.magFilter = NearestFilter;
-  t.minFilter = LinearMipmapLinearFilter;
-  t.generateMipmaps = true;
-  t.anisotropy = 4;
-  t.needsUpdate = true;
-  return t;
+  map.magFilter = NearestFilter;
+  map.minFilter = LinearMipmapLinearFilter;
+  map.generateMipmaps = true;
+  map.anisotropy = 4;
+  map.needsUpdate = true;
+
+  return {
+    texture: map,
+    draw(layout: FaceLayout): void {
+      paint(layout);
+      map.needsUpdate = true;
+    },
+  };
 }
 
 /**
@@ -529,15 +631,15 @@ export function createCard(): Card {
       envMapIntensity: 0.45,
     });
 
-  // Same landscape on both sides; the character is on the front only.
-  const face = makeFaceTexture(true);
-  const backFace = makeFaceTexture(false);
+  // The front is redrawn as the layout moves; the back never changes.
+  const face = makeFace(true);
+  const backFace = makeFace(false);
 
   // The substrate carries the front artwork too, so the card's edge is
   // printed rather than a dark rim. planarUV puts the side walls on the
   // texture's perimeter, so the edge is sky along the top and grass along the
   // bottom on its own — which is what an edge-printed card looks like.
-  const bodyMat = printed(face, 0x2c2f34);
+  const bodyMat = printed(face?.texture ?? null, 0x2c2f34);
 
   const body = new Mesh(
     plateGeometry(CARD.width, CARD.height, CARD.cornerRadius, CARD.thickness),
@@ -551,8 +653,8 @@ export function createCard(): Card {
   // Front and back are separate meshes. An extruded plate puts both caps in
   // one geometry group, so a single mesh cannot carry different art on each
   // side — which is why the back was showing the front's design.
-  const frontMat = printed(face, 0x2c2f34);
-  const backMat = printed(backFace, 0x232830);
+  const frontMat = printed(face?.texture ?? null, 0x2c2f34);
+  const backMat = printed(backFace?.texture ?? null, 0x232830);
 
   // Inset past the substrate's edge roundover. The extruded plate's cap is
   // narrower than its full width — the full width exists only at mid
@@ -573,6 +675,7 @@ export function createCard(): Card {
   front.name = "front";
   front.position.z = CARD.thickness / 2 + 2e-6;
   group.add(front);
+
 
   const back = new Mesh(facePlate(), backMat);
   back.name = "back";
@@ -612,6 +715,9 @@ export function createCard(): Card {
   );
   chip.castShadow = true;
   group.add(chip);
+  // The chip fades out for the game: it sits in the middle of the playfield,
+  // and a contact plate in the way of a running character reads as a bug.
+  chipMat.transparent = true;
 
   const anchors: CardAnchors = {
     chip: new Vector3(CARD.chipX, CARD.chipY, CARD.thickness / 2),
@@ -623,6 +729,18 @@ export function createCard(): Card {
   return {
     group,
     anchors,
+
+    setGameMix(t: number): void {
+      const mix = Math.max(0, Math.min(1, t));
+      // The scene is redrawn at the blended layout, so the horizon, the
+      // character and the clouds all visibly travel to their new places.
+      face?.draw(lerpLayout(DISPLAY_LAYOUT, GAME_LAYOUT, mix));
+      // The chip shrinks away rather than dissolving, for the same reason.
+      chip.scale.setScalar(Math.max(0.001, 1 - mix));
+      chipMat.opacity = 1 - mix;
+      chip.visible = mix < 0.999;
+    },
+
     dispose(): void {
       const geometries = new Set<BufferGeometry>();
       const materials = new Set<Material>();
@@ -633,8 +751,8 @@ export function createCard(): Card {
       });
       for (const g of geometries) g.dispose();
       brushed.dispose();
-      face?.dispose();
-      backFace?.dispose();
+      face?.texture.dispose();
+      backFace?.texture.dispose();
       chipMaps?.map.dispose();
       chipMaps?.roughnessMap.dispose();
       for (const m of materials) m.dispose();

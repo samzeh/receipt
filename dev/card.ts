@@ -48,6 +48,10 @@ let lastY = 0;
 let travelled = 0;
 let lastClickAt = 0;
 let since = 0;
+/** 0 shows the display face, 1 the playfield. Chased, not tweened, so it can
+ *  be redirected mid-flight when you come straight back out. */
+let mix = 0;
+let mixTarget = 0;
 
 const clampPitch = (v: number): number => Math.max(-PITCH_LIMIT, Math.min(PITCH_LIMIT, v));
 
@@ -70,6 +74,10 @@ const stage = createStage(
         const decay = Math.exp(-DECAY * dt);
         velX *= decay;
         velY *= decay;
+      }
+      if (dt > 0 && Math.abs(mixTarget - mix) > 0.0005) {
+        mix += (mixTarget - mix) * (1 - Math.exp(-dt * 4.5));
+        card.setGameMix(mix);
       }
       card.group.rotation.set(view.pose.rotX, view.pose.rotY, 0);
       // Live pose readout, throttled: handy for reading a pose you like back
@@ -116,6 +124,9 @@ function enter(): void {
   // Flip to the front and level it in one move, then push the camera in.
   // Landing square matters: the game is played on the face of the card.
   moveTo({ rotX: 0, rotY: squareFront(view.pose.rotY) }, FLIP_TIME, () => {
+    // The scene changes over as the camera moves in, so the shrink and the
+    // push arrive together rather than as two separate events.
+    mixTarget = 1;
     moveTo({ zoom: GAME_ZOOM }, ZOOM_TIME, () => {
       phase = "ready";
       report();
@@ -130,6 +141,7 @@ function exit(): void {
   phase = "idle";
   velX = 0;
   velY = 0;
+  mixTarget = 0;
   // A full turn backwards while the camera pulls back, landing on the resting
   // pose. The spin is the point — without it the exit is only a zoom, and
   // there is nothing to watch.
