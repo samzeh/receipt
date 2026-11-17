@@ -514,19 +514,19 @@ export function createCard(): Card {
   // reflectance tint, so artwork would render as tinted chrome rather than as
   // print; the ink has to sit on a dielectric. The clearcoat is the laminate,
   // and it is what keeps the chip reading as the one metal thing on the card.
+  // Matte print, deliberately unlacquered.
   const printed = (map: Texture | null, fallback: number): MeshPhysicalMaterial =>
     new MeshPhysicalMaterial({
       color: map ? 0xffffff : fallback,
       map,
-      metalness: 0.12,
-      roughness: 0.4,
+      metalness: 0,
+      roughness: 0.72,
       normalMap: brushed,
       // Very faint: a strong micro-normal smears the pixel edges, which is
       // the one thing this artwork cannot survive.
-      normalScale: new Vector2(0.06, 0.06),
-      clearcoat: 0.6,
-      clearcoatRoughness: 0.1,
-      envMapIntensity: 1,
+      normalScale: new Vector2(0.03, 0.03),
+      clearcoat: 0,
+      envMapIntensity: 0.45,
     });
 
   // Same landscape on both sides; the character is on the front only.
