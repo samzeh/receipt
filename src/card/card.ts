@@ -210,9 +210,10 @@ export function makeChipMaps(
   const top = h * 0.07;
   const bottom = h * 0.93;
 
-  // Etched gaps between contacts. Dark enough to survive a bright highlight:
-  // if the gaps sit close to the pads in value, the first clip takes them.
-  ctx.strokeStyle = "#6a6f77";
+  // Etched gaps between contacts. A groove in bright plating is only a little
+  // darker than the plating around it; pushing it dark turns the chip into a
+  // line drawing.
+  ctx.strokeStyle = "#a3a9b1";
   ctx.lineWidth = Math.round(w * 0.014);
   ctx.lineCap = "round";
   ctx.beginPath();
@@ -246,7 +247,7 @@ export function makeChipMaps(
   ctx.stroke();
 
   // Bond-wire dots in a couple of the pads.
-  ctx.fillStyle = "rgba(138,143,150,0.8)";
+  ctx.fillStyle = "rgba(164,170,178,0.75)";
   const dots: [number, number][] = [
     [0.18, 0.5],
     [0.82, 0.5],
@@ -260,7 +261,7 @@ export function makeChipMaps(
   }
 
   // A soft rim, so the plate reads as set into the card.
-  ctx.strokeStyle = "rgba(140,145,152,0.65)";
+  ctx.strokeStyle = "rgba(166,172,180,0.6)";
   ctx.lineWidth = Math.round(w * 0.018);
   roundedPath(
     ctx.lineWidth / 2,
@@ -286,7 +287,12 @@ export function makeChipMaps(
   const image = ctx.getImageData(0, 0, w, h);
   const pixels = image.data;
   for (let i = 0; i < pixels.length; i += 4) {
-    const rough = 255 - pixels[i]!;
+    // Compressed, not a straight inversion. The etched gaps are the same
+    // plating as the pads — just recessed — so they stay reflective. Letting
+    // them run to full roughness makes them read as matte ink drawn on
+    // plastic rather than as grooves cut into metal.
+    const inverted = 255 - pixels[i]!;
+    const rough = Math.round(26 + inverted * 0.26);
     pixels[i] = rough;
     pixels[i + 1] = rough;
     pixels[i + 2] = rough;
