@@ -1,3 +1,4 @@
+import { Raycaster, Vector2 } from "three";
 import { createStage, defaultStageDeps } from "../src/core/stage";
 import { CARD, createCard } from "../src/card/card";
 
@@ -14,6 +15,10 @@ const REST_Y = -0.38;
 const PITCH_LIMIT = 1.15;
 /** Seconds-ish constant for the spin to coast to a stop after release. */
 const DECAY = 3.4;
+/** How long a flip takes. Long enough to read as a turn, not a jump. */
+const FLIP_TIME = 0.6;
+/** A pointer that moved less than this many pixels was a click, not a drag. */
+const CLICK_SLOP = 5;
 
 const el = document.querySelector<HTMLElement>("#stage")!;
 
@@ -26,6 +31,9 @@ let velY = 0;
 let dragging = false;
 let lastX = 0;
 let lastY = 0;
+let travelled = 0;
+/** A flip in progress: where it started, where it is going, how far through. */
+let flip: { from: number; to: number; t: number } | null = null;
 
 const clampPitch = (v: number): number => Math.max(-PITCH_LIMIT, Math.min(PITCH_LIMIT, v));
 
@@ -34,7 +42,15 @@ const stage = createStage(
   defaultStageDeps(),
   {
     frame: (dt) => {
-      if (!dragging && dt > 0) {
+      if (flip && dt > 0) {
+        flip.t = Math.min(1, flip.t + dt / FLIP_TIME);
+        // Ease in and out: a flip that starts and stops abruptly reads as a
+        // texture swap rather than as the card turning over.
+        const t = flip.t;
+        const eased = t < 0.5 ? 4 * t * t * t : 1 - (-2 * t + 2) ** 3 / 2;
+        rotY = flip.from + (flip.to - flip.from) * eased;
+        if (flip.t >= 1) flip = null;
+      } else if (!dragging && dt > 0) {
         rotY += velY;
         rotX = clampPitch(rotX + velX);
         const decay = Math.exp(-DECAY * dt);
@@ -78,12 +94,26 @@ frameCard();
 const canvas = stage.canvas;
 canvas.style.cursor = "grab";
 
+const raycaster = new Raycaster();
+const ndc = new Vector2();
+
+/** Whether a pointer event landed on the card rather than on empty space. */
+function overCard(e: PointerEvent): boolean {
+  const r = canvas.getBoundingClientRect();
+  ndc.set(((e.clientX - r.left) / r.width) * 2 - 1, -(((e.clientY - r.top) / r.height) * 2 - 1));
+  raycaster.setFromCamera(ndc, camera);
+  return raycaster.intersectObject(card.group, true).length > 0;
+}
+
 canvas.addEventListener("pointerdown", (e) => {
   dragging = true;
   lastX = e.clientX;
   lastY = e.clientY;
+  travelled = 0;
   velX = 0;
   velY = 0;
+  // Taking hold of the card cancels a flip, so a drag always wins.
+  flip = null;
   canvas.style.cursor = "grabbing";
   canvas.setPointerCapture?.(e.pointerId);
 });
@@ -93,6 +123,7 @@ canvas.addEventListener("pointermove", (e) => {
   // Scale by viewport width so a drag across the screen turns the card by
   // about the same amount on any display.
   const k = 4.2 / Math.max(1, canvas.clientWidth);
+  travelled += Math.abs(e.clientX - lastX) + Math.abs(e.clientY - lastY);
   velY = (e.clientX - lastX) * k;
   velX = (e.clientY - lastY) * k;
   lastX = e.clientX;
@@ -101,13 +132,22 @@ canvas.addEventListener("pointermove", (e) => {
   rotX = clampPitch(rotX + velX);
 });
 
-const release = (): void => {
+const release = (e?: PointerEvent): void => {
   if (!dragging) return;
   dragging = false;
   canvas.style.cursor = "grab";
+
+  // A click, not a drag, and on the card rather than past it: turn it over.
+  // Half a turn from wherever it currently is, so a flip from a tilted pose
+  // keeps its tilt instead of snapping square first.
+  if (e && travelled < CLICK_SLOP && overCard(e)) {
+    velX = 0;
+    velY = 0;
+    flip = { from: rotY, to: rotY + Math.PI, t: 0 };
+  }
 };
 canvas.addEventListener("pointerup", release);
-canvas.addEventListener("pointercancel", release);
+canvas.addEventListener("pointercancel", () => release());
 
 // Dolly only — the camera's angle stays put, so the card is always framed
 // head-on and only its own rotation changes the view.
@@ -133,6 +173,6 @@ hud.textContent = [
   `corner      ${mm(CARD.cornerRadius)}`,
   `chip        ${mm(CARD.chipWidth)} x ${mm(CARD.chipHeight)}`,
   ``,
-  `drag the card, scroll to zoom`,
+  `drag to turn, click to flip, scroll to zoom`,
 ].join("\n");
 document.body.appendChild(hud);
