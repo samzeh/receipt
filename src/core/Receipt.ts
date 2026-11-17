@@ -1,26 +1,26 @@
-import {
-  CanvasTexture, DataTexture, EquirectangularReflectionMapping, Group, Mesh,
-  type MeshPhysicalMaterial, PMREMGenerator, RGBAFormat, Scene, SRGBColorSpace,
-  type Texture, WebGLRenderer,
-} from "three";
+import { CanvasTexture, DataTexture, Group, Mesh, RGBAFormat, SRGBColorSpace } from "three";
+import type { MeshPhysicalMaterial, Texture } from "three";
 import { createPointerRig, meshPicker, type PointerRig } from "../input/pointer";
 import { buildGeometry, syncGeometry } from "../render/mesh";
 import { createPaperMaterial } from "../render/paperMaterial";
-import { createStudio, type Studio } from "../scene/studio";
 import { Cloth, DEFAULT_PARAMS, substepsFor, type ClothParams } from "../sim/Cloth";
 import { drawReceipt, inkMask, pixelSize, type DrawTarget } from "../text/draw";
 import { DEFAULT_LAYOUT, layoutReceipt, type ReceiptLayout } from "../text/layout";
+import {
+  createStage,
+  defaultStageDeps,
+  type RendererLike,
+  type StageDeps,
+  type StageError,
+} from "./stage";
 
-const SIM_STEP = 1 / 120;
-const MAX_STEPS_PER_FRAME = 4;
 const FONT_FAMILY = "JetBrains Mono";
 /** How much of the frame the receipt leaves empty. 1 fills it edge to edge. */
 const FRAME_PADDING = 1.6;
 
-export interface ReceiptError {
-  code: "no-webgl" | "context-lost" | "clamped" | "diverged";
-  message: string;
-}
+export type ReceiptError = StageError;
+export type ReceiptDeps = StageDeps;
+export type { RendererLike };
 
 export interface ReceiptOptions {
   text: string;
@@ -49,37 +49,6 @@ export interface ReceiptHandle {
   /** Re-frames the camera on where the receipt actually is now. */
   recenter(): void;
   dispose(): void;
-}
-
-/** The slice of WebGLRenderer this module uses, so tests can stand one in. */
-export interface RendererLike {
-  domElement: HTMLCanvasElement;
-  setSize(w: number, h: number, updateStyle?: boolean): void;
-  setPixelRatio(ratio: number): void;
-  render(scene: Scene, camera: Studio["camera"]): void;
-  dispose(): void;
-}
-
-export interface ReceiptDeps {
-  createRenderer: (canvas: HTMLCanvasElement) => RendererLike;
-  createCanvas: (w: number, h: number) => HTMLCanvasElement;
-  requestFrame: (cb: (t: number) => void) => number;
-  cancelFrame: (id: number) => void;
-}
-
-function defaultDeps(): ReceiptDeps {
-  return {
-    createRenderer: (canvas) =>
-      new WebGLRenderer({ canvas, antialias: true, alpha: true }) as unknown as RendererLike,
-    createCanvas: (w, h) => {
-      const c = document.createElement("canvas");
-      c.width = w;
-      c.height = h;
-      return c;
-    },
-    requestFrame: (cb) => requestAnimationFrame(cb),
-    cancelFrame: (id) => cancelAnimationFrame(id),
-  };
 }
 
 function prefersReducedMotion(): boolean {
@@ -154,7 +123,7 @@ export function createReceipt(
   options: ReceiptOptions,
   deps?: Partial<ReceiptDeps>,
 ): ReceiptHandle {
-  const d: ReceiptDeps = { ...defaultDeps(), ...deps };
+  const d: ReceiptDeps = { ...defaultStageDeps(), ...deps };
   const widthMm = options.widthMm ?? DEFAULT_LAYOUT.widthMm;
   const dpi = options.dpi ?? 300;
   const anchor = options.anchor ?? "none";
@@ -163,19 +132,8 @@ export function createReceipt(
     options.onError?.({ code, message });
 
   let disposed = false;
-  let running = true;
-  let frameId: number | null = null;
-  let last = 0;
-  let accumulator = 0;
   let reportedDiverged = false;
   let piece: Piece | null = null;
-  let observer: IntersectionObserver | null = null;
-  let resizer: ResizeObserver | null = null;
-
-  const width = Math.max(1, container.clientWidth || 640);
-  const height = Math.max(1, container.clientHeight || 480);
-
-  // --- texture + simulation construction -------------------------------------
 
   function draw(text: string): { canvas: HTMLCanvasElement; layout: ReceiptLayout } {
     const layout = layoutReceipt(text, { widthMm });
@@ -187,6 +145,54 @@ export function createReceipt(
     drawReceipt(canvas as unknown as DrawTarget, layout, size.dpi, FONT_FAMILY);
     return { canvas, layout };
   }
+
+  // --- stage -----------------------------------------------------------------
+
+  const stage = createStage(container, d, {
+    step: (h) => {
+      if (!piece) return;
+      piece.rig.update();
+      piece.cloth.step(h);
+    },
+    frame: () => {
+      if (!piece) return;
+      if (piece.cloth.diverged && !reportedDiverged) {
+        reportedDiverged = true;
+        fail("diverged", "simulation diverged and was reset");
+      }
+      syncGeometry(piece.mesh.geometry, piece.cloth);
+    },
+    resize: () => {
+      if (piece) centreOn(piece);
+    },
+    error: (e) => options.onError?.(e),
+  });
+
+  // No renderer: the text path needs no GPU, so show a flat image of the
+  // receipt rather than nothing at all.
+  if (!stage) {
+    const { canvas } = draw(options.text);
+    const img = document.createElement("img");
+    img.alt = "receipt";
+    try {
+      img.src = canvas.toDataURL();
+    } catch {
+      img.src = "";
+    }
+    img.style.maxWidth = "100%";
+    container.appendChild(img);
+    return {
+      setText: () => {},
+      recenter: () => {},
+      dispose: () => container.replaceChildren(),
+    };
+  }
+
+  const studio = stage.studio;
+  const group = new Group();
+  stage.scene.add(group);
+
+  // --- piece construction ----------------------------------------------------
 
   function build(text: string): Piece {
     const { canvas, layout } = draw(text);
@@ -246,8 +252,7 @@ export function createReceipt(
     const h = maxY - minY;
     const vTan = Math.tan(((studio.camera.fov / 2) * Math.PI) / 180);
     const hTan = vTan * studio.camera.aspect;
-    const dist =
-      Math.max(h / (2 * vTan), w / (2 * hTan)) * FRAME_PADDING + (maxZ - minZ) / 2;
+    const dist = Math.max(h / (2 * vTan), w / (2 * hTan)) * FRAME_PADDING + (maxZ - minZ) / 2;
     studio.camera.position.set(0, 0, dist);
     studio.camera.lookAt(0, 0, 0);
     studio.camera.updateMatrixWorld(true);
@@ -260,68 +265,17 @@ export function createReceipt(
     group.remove(p.mesh);
   }
 
-  // --- scene -----------------------------------------------------------------
-
-  const scene = new Scene();
-  const studio = createStudio(width / height);
-  const group = new Group();
-  scene.add(group);
-  for (const light of studio.lights) scene.add(light);
-
-  // --- renderer --------------------------------------------------------------
-
-  let renderer: RendererLike;
-  try {
-    renderer = d.createRenderer(d.createCanvas(width, height));
-  } catch (e) {
-    fail("no-webgl", e instanceof Error ? e.message : "renderer unavailable");
-    const { canvas } = draw(options.text);
-    const img = document.createElement("img");
-    img.alt = "receipt";
-    try {
-      img.src = canvas.toDataURL();
-    } catch {
-      img.src = "";
-    }
-    img.style.maxWidth = "100%";
-    container.appendChild(img);
-    return {
-      setText: () => {},
-      recenter: () => {},
-      dispose: () => container.replaceChildren(),
-    };
-  }
-
-  renderer.setPixelRatio(Math.min(2, globalThis.devicePixelRatio ?? 1));
-  // updateStyle must stay on: with it off, three sets only the canvas's
-  // attribute size, so at devicePixelRatio 2 the element lays out at twice the
-  // viewport and everything but its top-left quarter is off-screen.
-  renderer.setSize(width, height, true);
-  renderer.domElement.style.display = "block";
-  renderer.domElement.style.width = "100%";
-  renderer.domElement.style.height = "100%";
-  container.appendChild(renderer.domElement);
-
-  if (renderer instanceof WebGLRenderer) {
-    const pmrem = new PMREMGenerator(renderer);
-    scene.environment = pmrem.fromEquirectangular(studio.environment).texture;
-    pmrem.dispose();
-  } else {
-    studio.environment.mapping = EquirectangularReflectionMapping;
-    scene.environment = studio.environment;
-  }
-
   piece = build(options.text);
   group.add(piece.mesh);
   centreOn(piece);
 
   // --- input -----------------------------------------------------------------
 
-  const canvasEl = renderer.domElement;
+  const canvasEl = stage.canvas;
   const toNdc = (e: PointerEvent): [number, number] => {
     const r = canvasEl.getBoundingClientRect();
-    const w = r.width || width;
-    const h = r.height || height;
+    const w = r.width || stage.width;
+    const h = r.height || stage.height;
     return [((e.clientX - r.left) / w) * 2 - 1, -(((e.clientY - r.top) / h) * 2 - 1)];
   };
   const onDown = (e: PointerEvent): void => {
@@ -334,77 +288,12 @@ export function createReceipt(
     piece?.rig.pointerMove(x, y);
   };
   const onUp = (): void => piece?.rig.pointerUp();
-  const onContextLost = (e: Event): void => {
-    e.preventDefault();
-    running = false;
-    fail("context-lost", "webgl context lost");
-  };
-  const onVisibility = (): void => {
-    running = document.visibilityState !== "hidden";
-  };
 
   canvasEl.addEventListener("pointerdown", onDown);
   canvasEl.addEventListener("pointermove", onMove);
   canvasEl.addEventListener("pointerup", onUp);
   canvasEl.addEventListener("pointercancel", onUp);
-  canvasEl.addEventListener("webglcontextlost", onContextLost);
-  document.addEventListener("visibilitychange", onVisibility);
 
-  // Without this the drawing buffer keeps its mount-time size while CSS
-  // stretches the canvas, so a resized window skews the image off-centre.
-  if (typeof ResizeObserver !== "undefined") {
-    resizer = new ResizeObserver(() => {
-      const w = Math.max(1, container.clientWidth || width);
-      const h = Math.max(1, container.clientHeight || height);
-      renderer.setSize(w, h, true);
-      renderer.domElement.style.width = "100%";
-      renderer.domElement.style.height = "100%";
-      studio.camera.aspect = w / h;
-      studio.camera.updateProjectionMatrix();
-      if (piece) centreOn(piece);
-    });
-    resizer.observe(container);
-  }
-
-  if (typeof IntersectionObserver !== "undefined") {
-    observer = new IntersectionObserver((entries) => {
-      const entry = entries[0];
-      if (entry) running = entry.isIntersecting;
-    });
-    observer.observe(container);
-  }
-
-  // --- loop ------------------------------------------------------------------
-
-  function frame(t: number): void {
-    if (disposed) return;
-    frameId = d.requestFrame(frame);
-    if (!running || !piece) {
-      last = t;
-      return;
-    }
-    const dt = last === 0 ? 0 : Math.min(0.25, (t - last) / 1000);
-    last = t;
-    accumulator += dt;
-    let steps = 0;
-    while (accumulator >= SIM_STEP && steps < MAX_STEPS_PER_FRAME) {
-      piece.rig.update();
-      piece.cloth.step(SIM_STEP);
-      accumulator -= SIM_STEP;
-      steps += 1;
-    }
-    // Drop any backlog beyond the cap rather than chasing it forever.
-    if (accumulator > SIM_STEP * MAX_STEPS_PER_FRAME) accumulator = 0;
-
-    if (piece.cloth.diverged && !reportedDiverged) {
-      reportedDiverged = true;
-      fail("diverged", "simulation diverged and was reset");
-    }
-    syncGeometry(piece.mesh.geometry, piece.cloth);
-    renderer.render(scene, studio.camera);
-  }
-
-  frameId = d.requestFrame(frame);
   options.onReady?.();
 
   return {
@@ -414,8 +303,7 @@ export function createReceipt(
       piece = build(text);
       group.add(piece.mesh);
       centreOn(piece);
-      accumulator = 0;
-      last = 0;
+      stage.resetClock();
     },
 
     recenter(): void {
@@ -426,21 +314,13 @@ export function createReceipt(
     dispose(): void {
       if (disposed) return;
       disposed = true;
-      if (frameId !== null) d.cancelFrame(frameId);
-      observer?.disconnect();
-      resizer?.disconnect();
       canvasEl.removeEventListener("pointerdown", onDown);
       canvasEl.removeEventListener("pointermove", onMove);
       canvasEl.removeEventListener("pointerup", onUp);
       canvasEl.removeEventListener("pointercancel", onUp);
-      canvasEl.removeEventListener("webglcontextlost", onContextLost);
-      document.removeEventListener("visibilitychange", onVisibility);
       if (piece) destroyPiece(piece);
       piece = null;
-      studio.environment.dispose();
-      scene.environment?.dispose();
-      renderer.dispose();
-      container.replaceChildren();
+      stage.dispose();
     },
   };
 }

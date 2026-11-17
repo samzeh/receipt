@@ -118,14 +118,24 @@ export function buildLongRange(
     count: 0,
   };
   for (let c = 0; c < cols; c++) {
-    const anchor = c;
-    // Only columns whose top particle is pinned have an anchor to hang from.
-    if (invMass[anchor] !== 0) continue;
-    for (let r = 1; r < rows; r++) {
+    // A column hangs from whichever of its rows is pinned, which is not always
+    // row 0: a sheet fed from a printer is clamped at its newest row instead.
+    let anchorRow = -1;
+    for (let r = 0; r < rows; r++) {
+      if (invMass[r * cols + c] === 0) {
+        anchorRow = r;
+        break;
+      }
+    }
+    // Only columns with a pinned row have an anchor to hang from.
+    if (anchorRow < 0) continue;
+    const anchor = anchorRow * cols + c;
+    for (let r = 0; r < rows; r++) {
+      if (r === anchorRow) continue;
       const k = set.count++;
       set.particle[k] = r * cols + c;
       set.anchor[k] = anchor;
-      set.maxDist[k] = r * spacing;
+      set.maxDist[k] = Math.abs(r - anchorRow) * spacing;
     }
   }
   return set;

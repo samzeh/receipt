@@ -180,11 +180,14 @@ export class Cloth {
   }
 
   /**
-   * Grows the grid by one row. Exists to serve the deferred printer feed, which
-   * will overwrite the new row's position from the emission point before
-   * stepping; until then it starts at its rest position.
+   * Grows the grid by one row. Serves the printer feed: paper is created at the
+   * slot, so `origin` places the new row there, keeping its across-width shape
+   * and translating it as a unit. Collapsing the row to a single point would
+   * make every across-width constraint degenerate.
+   *
+   * With no origin the row starts at its rest position.
    */
-  appendRow(): void {
+  appendRow(origin?: ArrayLike<number> | null): void {
     const grown = this.count + this.cols;
     const pos = new Float32Array(grown * 3);
     const prev = new Float32Array(grown * 3);
@@ -199,8 +202,32 @@ export class Cloth {
     this.vel = vel;
     this.invMass = invMass;
     this.rows += 1;
-    this.layOut(this.rows - 1, this.rows);
+    const row = this.rows - 1;
+    this.layOut(row, this.rows);
+    if (origin) this.placeRow(row, origin);
     this.rebuild();
+  }
+
+  /**
+   * Moves a laid-out row to `origin`, preserving the across-width shape the
+   * rest layout gave it. The row's own y is discarded — the emission point
+   * decides it — while x and z keep their offsets from the sheet's centre line.
+   */
+  protected placeRow(row: number, origin: ArrayLike<number>): void {
+    const rest = new Float32Array(3);
+    for (let col = 0; col < this.cols; col++) {
+      const i = this.index(col, row);
+      this.restPosition(i, rest);
+      this.pos[i * 3] = origin[0]! + rest[0]!;
+      this.pos[i * 3 + 1] = origin[1]!;
+      this.pos[i * 3 + 2] = origin[2]! + rest[2]!;
+      this.prev[i * 3] = this.pos[i * 3]!;
+      this.prev[i * 3 + 1] = this.pos[i * 3 + 1]!;
+      this.prev[i * 3 + 2] = this.pos[i * 3 + 2]!;
+      this.vel[i * 3] = 0;
+      this.vel[i * 3 + 1] = 0;
+      this.vel[i * 3 + 2] = 0;
+    }
   }
   protected longRange: LongRangeSet | null = null;
   private pinsDirty = true;

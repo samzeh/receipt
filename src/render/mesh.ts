@@ -37,11 +37,17 @@ export function syncGeometry(geometry: BufferGeometry, cloth: Cloth): void {
   const normal = geometry.getAttribute("normal") as BufferAttribute;
   const pos = position.array as Float32Array;
   const nrm = normal.array as Float32Array;
-  pos.set(cloth.pos);
-  nrm.fill(0);
+  // The printer feeds paper by growing the cloth, so the geometry is built at
+  // the receipt's final length and the cloth may be shorter than it. Copying a
+  // shorter source fills a prefix and leaves the rest untouched and undrawn.
+  pos.set(cloth.pos.length > pos.length ? cloth.pos.subarray(0, pos.length) : cloth.pos);
 
   const index = geometry.getIndex()!.array as ArrayLike<number>;
-  for (let t = 0; t < index.length; t += 3) {
+  const live = Math.min((cloth.rows - 1) * (cloth.cols - 1) * 6, index.length);
+  const liveVerts = Math.min(cloth.count, nrm.length / 3);
+  nrm.fill(0, 0, liveVerts * 3);
+
+  for (let t = 0; t < live; t += 3) {
     const a = index[t]!;
     const b = index[t + 1]!;
     const c = index[t + 2]!;
@@ -61,7 +67,7 @@ export function syncGeometry(geometry: BufferGeometry, cloth: Cloth): void {
       nrm[i * 3 + 2] = nrm[i * 3 + 2]! + nz;
     }
   }
-  for (let i = 0; i < nrm.length; i += 3) {
+  for (let i = 0; i < liveVerts * 3; i += 3) {
     const len = Math.hypot(nrm[i]!, nrm[i + 1]!, nrm[i + 2]!);
     if (len < 1e-20) {
       nrm[i + 2] = 1;
@@ -73,5 +79,8 @@ export function syncGeometry(geometry: BufferGeometry, cloth: Cloth): void {
   }
   position.needsUpdate = true;
   normal.needsUpdate = true;
+  // Mesh.raycast clamps to the draw range too, so paper still inside the
+  // printer is neither drawn nor grabbable.
+  geometry.setDrawRange(0, live);
   geometry.computeBoundingSphere();
 }
