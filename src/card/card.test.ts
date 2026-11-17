@@ -64,13 +64,19 @@ describe("createCard", () => {
     card.dispose();
   });
 
-  it("sets the chip left of centre and above it, as on a real card", () => {
+  it("sets the chip right of centre and below the midline", () => {
     const card = createCard();
 
-    expect(card.anchors.chip.x).toBeLessThan(0);
-    expect(card.anchors.chip.y).toBeGreaterThan(0);
+    expect(card.anchors.chip.x).toBeGreaterThan(0);
+    expect(card.anchors.chip.y).toBeLessThan(0);
 
     card.dispose();
+  });
+
+  it("keeps the chip close to square, as a modern contact plate is", () => {
+    const ratio = CARD.chipWidth / CARD.chipHeight;
+    expect(ratio).toBeGreaterThan(0.95);
+    expect(ratio).toBeLessThan(1.3);
   });
 
   it("keeps the whole chip on the card", () => {

@@ -46,7 +46,7 @@ const stage = createStage(
     resize: () => frameCard(),
     error: (e) => console.warn("[card]", e.code, e.message),
   },
-  { studio: "light", background: BACKDROP, exposure: 1.05 },
+  { studio: "light", background: BACKDROP, exposure: 0.95 },
 );
 if (!stage) throw new Error("no webgl");
 

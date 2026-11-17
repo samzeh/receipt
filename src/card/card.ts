@@ -22,14 +22,14 @@ export const CARD = {
   thickness: 0.0008,
   cornerRadius: 0.00318,
 
-  /** EMV contact plate. Roughly 12 x 9.5mm on a real card. */
-  chipWidth: 0.012,
-  chipHeight: 0.0095,
-  chipRadius: 0.0009,
-  /** Measured from the card's centre. The chip sits left of centre and a
-   *  little above it, as on any EMV card. */
-  chipX: -0.0188,
-  chipY: 0.0055,
+  /** EMV contact plate — nearly square, as on a modern card. */
+  chipWidth: 0.0122,
+  chipHeight: 0.011,
+  chipRadius: 0.0013,
+  /** Measured from the card's centre: right of centre, a little below the
+   *  midline. */
+  chipX: 0.023,
+  chipY: -0.003,
   /** Chips stand very slightly proud of the card face. */
   chipProud: 0.00004,
 } as const;
@@ -156,7 +156,10 @@ export function makeBrushedNormalMap(size = 512): DataTexture {
  *
  * Returns null without a DOM, so the geometry stays testable in Node.
  */
-export function makeChipTexture(w = 512, h = 406): Texture | null {
+export function makeChipMaps(
+  w = 512,
+  h = 462,
+): { map: Texture; roughnessMap: Texture } | null {
   if (typeof document === "undefined") return null;
   const canvas = document.createElement("canvas");
   canvas.width = w;
@@ -164,50 +167,136 @@ export function makeChipTexture(w = 512, h = 406): Texture | null {
   const ctx = canvas.getContext("2d");
   if (!ctx) return null;
 
-  // Base gold, with a faint vertical gradient so the plate is not uniform.
-  const base = ctx.createLinearGradient(0, 0, 0, h);
-  base.addColorStop(0, "#e8c877");
-  base.addColorStop(0.45, "#cfa94f");
-  base.addColorStop(1, "#b89441");
+  /** Rounded rectangle as a path, since roundRect is not everywhere. */
+  const roundedPath = (x: number, y: number, rw: number, rh: number, r: number): void => {
+    const rad = Math.min(r, rw / 2, rh / 2);
+    ctx.beginPath();
+    ctx.moveTo(x + rad, y);
+    ctx.arcTo(x + rw, y, x + rw, y + rh, rad);
+    ctx.arcTo(x + rw, y + rh, x, y + rh, rad);
+    ctx.arcTo(x, y + rh, x, y, rad);
+    ctx.arcTo(x, y, x + rw, y, rad);
+    ctx.closePath();
+  };
+
+  // Brushed silver, lit from the upper left.
+  // Bright, because for a metal the base colour IS its reflectance: silver
+  // reflects about 95%, so a mid-grey plate reads as painted, not plated.
+  const base = ctx.createLinearGradient(0, 0, w * 0.4, h);
+  base.addColorStop(0, "#e9ebee");
+  base.addColorStop(0.45, "#c9cdd2");
+  base.addColorStop(0.75, "#dde0e4");
+  base.addColorStop(1, "#b7bbc1");
   ctx.fillStyle = base;
   ctx.fillRect(0, 0, w, h);
 
-  // Etched gaps between contacts. Dark, thin, and slightly soft.
-  ctx.strokeStyle = "#6b5520";
-  ctx.lineWidth = Math.round(w * 0.016);
-  ctx.lineCap = "round";
-
-  const inset = w * 0.1;
-  const midY = h / 2;
-  const gapY = h * 0.1;
-
+  // The fine mesh across the plate. Barely visible up close and entirely
+  // responsible for it not looking like flat paint.
+  ctx.strokeStyle = "rgba(122,127,134,0.16)";
+  ctx.lineWidth = 1;
   ctx.beginPath();
-  // The horizontal split across the whole plate.
-  ctx.moveTo(inset * 0.4, midY);
-  ctx.lineTo(w - inset * 0.4, midY);
-  // Two vertical dividers on each half, making the familiar six-pad grid.
-  for (const x of [w * 0.34, w * 0.66]) {
-    ctx.moveTo(x, h * 0.08);
-    ctx.lineTo(x, midY - gapY * 0.1);
-    ctx.moveTo(x, midY + gapY * 0.1);
-    ctx.lineTo(x, h * 0.92);
+  for (let x = 0; x <= w; x += 7) {
+    ctx.moveTo(x + 0.5, 0);
+    ctx.lineTo(x + 0.5, h);
   }
-  // The central contact's island.
-  ctx.moveTo(w * 0.42, midY - gapY);
-  ctx.lineTo(w * 0.58, midY - gapY);
-  ctx.moveTo(w * 0.42, midY + gapY);
-  ctx.lineTo(w * 0.58, midY + gapY);
+  for (let y = 0; y <= h; y += 7) {
+    ctx.moveTo(0, y + 0.5);
+    ctx.lineTo(w, y + 0.5);
+  }
   ctx.stroke();
 
-  // A darker rim, so the plate reads as set into the card.
-  ctx.strokeStyle = "rgba(90,70,25,0.55)";
-  ctx.lineWidth = Math.round(w * 0.022);
-  ctx.strokeRect(ctx.lineWidth / 2, ctx.lineWidth / 2, w - ctx.lineWidth, h - ctx.lineWidth);
+  const left = w * 0.3;
+  const right = w * 0.7;
+  const top = h * 0.07;
+  const bottom = h * 0.93;
 
-  const t = new CanvasTexture(canvas);
-  t.colorSpace = SRGBColorSpace;
-  t.needsUpdate = true;
-  return t;
+  // Etched gaps between contacts. Dark enough to survive a bright highlight:
+  // if the gaps sit close to the pads in value, the first clip takes them.
+  ctx.strokeStyle = "#6a6f77";
+  ctx.lineWidth = Math.round(w * 0.014);
+  ctx.lineCap = "round";
+  ctx.beginPath();
+  // Columns.
+  ctx.moveTo(left, top);
+  ctx.lineTo(left, bottom);
+  ctx.moveTo(right, top);
+  ctx.lineTo(right, bottom);
+  // Three pads down each side.
+  for (const y of [h * 0.36, h * 0.64]) {
+    ctx.moveTo(w * 0.06, y);
+    ctx.lineTo(left, y);
+    ctx.moveTo(right, y);
+    ctx.lineTo(w * 0.94, y);
+  }
+  // Angled cuts at the bottom corners.
+  ctx.moveTo(w * 0.06, h * 0.84);
+  ctx.lineTo(w * 0.15, h * 0.945);
+  ctx.moveTo(w * 0.94, h * 0.84);
+  ctx.lineTo(w * 0.85, h * 0.945);
+  ctx.stroke();
+
+  // The waisted central island: wide through the middle, pinched top and
+  // bottom. It is the shape that makes a chip read as a chip.
+  ctx.beginPath();
+  ctx.moveTo(w * 0.43, top + h * 0.06);
+  ctx.bezierCurveTo(w * 0.355, h * 0.26, w * 0.355, h * 0.74, w * 0.43, bottom - h * 0.06);
+  ctx.lineTo(w * 0.57, bottom - h * 0.06);
+  ctx.bezierCurveTo(w * 0.645, h * 0.74, w * 0.645, h * 0.26, w * 0.57, top + h * 0.06);
+  ctx.closePath();
+  ctx.stroke();
+
+  // Bond-wire dots in a couple of the pads.
+  ctx.fillStyle = "rgba(138,143,150,0.8)";
+  const dots: [number, number][] = [
+    [0.18, 0.5],
+    [0.82, 0.5],
+    [0.18, 0.78],
+    [0.82, 0.22],
+  ];
+  for (const [dx, dy] of dots) {
+    ctx.beginPath();
+    ctx.arc(w * dx, h * dy, w * 0.011, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // A soft rim, so the plate reads as set into the card.
+  ctx.strokeStyle = "rgba(140,145,152,0.65)";
+  ctx.lineWidth = Math.round(w * 0.018);
+  roundedPath(
+    ctx.lineWidth / 2,
+    ctx.lineWidth / 2,
+    w - ctx.lineWidth,
+    h - ctx.lineWidth,
+    w * 0.11,
+  );
+  ctx.stroke();
+
+  const map = new CanvasTexture(canvas);
+  map.colorSpace = SRGBColorSpace;
+  map.needsUpdate = true;
+
+  // Roughness derived from the art rather than drawn twice: the polished pads
+  // are the bright areas and the etched gaps are the dark ones, so inverting
+  // luminance gives smooth pads and matte etching for free.
+  const roughCanvas = document.createElement("canvas");
+  roughCanvas.width = w;
+  roughCanvas.height = h;
+  const roughCtx = roughCanvas.getContext("2d");
+  if (!roughCtx) return null;
+  const image = ctx.getImageData(0, 0, w, h);
+  const pixels = image.data;
+  for (let i = 0; i < pixels.length; i += 4) {
+    const rough = 255 - pixels[i]!;
+    pixels[i] = rough;
+    pixels[i + 1] = rough;
+    pixels[i + 2] = rough;
+  }
+  roughCtx.putImageData(image, 0, 0);
+
+  const roughnessMap = new CanvasTexture(roughCanvas);
+  roughnessMap.needsUpdate = true;
+
+  return { map, roughnessMap };
 }
 
 export function createCard(): Card {
@@ -215,15 +304,19 @@ export function createCard(): Card {
   group.name = "card";
 
   const brushed = makeBrushedNormalMap();
+  // Matte metal: a card you would actually hold, not a mirror. The chip is
+  // the only polished thing on it, and that contrast is the point — a
+  // reflective plate on a satin card reads as a component set into metal.
   const bodyMat = new MeshPhysicalMaterial({
     color: 0x2c2f34,
     metalness: 1,
-    roughness: 0.34,
+    roughness: 0.46,
     normalMap: brushed,
     // Scratches run across the card, so the highlight stretches along it.
-    normalScale: new Vector2(0.35, 0.35),
-    clearcoat: 0.35,
-    clearcoatRoughness: 0.22,
+    normalScale: new Vector2(0.32, 0.32),
+    clearcoat: 0.3,
+    clearcoatRoughness: 0.38,
+    envMapIntensity: 0.8,
   });
 
   const body = new Mesh(
@@ -235,14 +328,23 @@ export function createCard(): Card {
   body.receiveShadow = true;
   group.add(body);
 
-  const chipMap = makeChipTexture();
+  const chipMaps = makeChipMaps();
+  // Bare plated metal, deliberately a different surface from the card's.
+  // The card is coated — it has a clearcoat, which is a dielectric lacquer
+  // over the metal. A chip has no lacquer, so dropping the clearcoat is most
+  // of what separates the two materials; the rest is being sharper, brighter
+  // and letting the map drive roughness across the plate.
   const chipMat = new MeshPhysicalMaterial({
-    color: chipMap ? 0xffffff : 0xc9a14a,
-    map: chipMap ?? null,
+    color: chipMaps ? 0xffffff : 0xdfe2e6,
+    map: chipMaps?.map ?? null,
+    roughnessMap: chipMaps?.roughnessMap ?? null,
     metalness: 1,
-    roughness: 0.17,
-    clearcoat: 0.6,
-    clearcoatRoughness: 0.12,
+    roughness: chipMaps ? 1 : 0.18,
+    clearcoat: 0,
+    // Metal reflects nearly all of what hits it, so this multiplies straight
+    // into the highlight. Above about 1 the plate clips and the etched
+    // pattern disappears into flat white.
+    envMapIntensity: 0.85,
   });
 
   const chipThickness = 0.00016;
@@ -262,8 +364,8 @@ export function createCard(): Card {
   const anchors: CardAnchors = {
     chip: new Vector3(CARD.chipX, CARD.chipY, CARD.thickness / 2),
     face: new Vector3(0, 0, 1),
-    // Chip first, so the short edge nearest the chip leads.
-    insertEdge: new Vector3(-CARD.width / 2, 0, 0),
+    // Chip first, so whichever short edge the chip sits nearest leads.
+    insertEdge: new Vector3(Math.sign(CARD.chipX) * (CARD.width / 2), 0, 0),
   };
 
   return {
@@ -279,7 +381,8 @@ export function createCard(): Card {
       });
       for (const g of geometries) g.dispose();
       brushed.dispose();
-      chipMap?.dispose();
+      chipMaps?.map.dispose();
+      chipMaps?.roughnessMap.dispose();
       for (const m of materials) m.dispose();
       group.clear();
     },

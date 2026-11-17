@@ -50,6 +50,41 @@ describe("studio environment", () => {
   });
 });
 
+describe("light studio", () => {
+  it("keeps real darks, so a polished surface has something to reflect", () => {
+    // A bright room with no dark in it renders a mirror as a flat grey card:
+    // the metal reflects the environment, and a uniform dome averages to a
+    // single tone. The contrast is the reflection.
+    const data = pixels(createStudio(1, "light"));
+
+    let min = Infinity;
+    let max = -Infinity;
+    for (let i = 0; i < data.length; i += 4) {
+      min = Math.min(min, data[i]!);
+      max = Math.max(max, data[i]!);
+    }
+
+    expect(min).toBeLessThan(0.1);
+    expect(max).toBeGreaterThan(5);
+    expect(max / Math.max(min, 1e-6)).toBeGreaterThan(50);
+  });
+
+  it("is brighter on average than the dark room", () => {
+    const average = (mode: "dark" | "light"): number => {
+      const data = pixels(createStudio(1, mode));
+      let sum = 0;
+      let n = 0;
+      for (let i = 0; i < data.length; i += 4) {
+        sum += data[i]!;
+        n += 1;
+      }
+      return sum / n;
+    };
+
+    expect(average("light")).toBeGreaterThan(average("dark") * 3);
+  });
+});
+
 describe("enableShadows", () => {
   it("sizes the shadow frustum to the scene, not to metres", () => {
     const studio = createStudio(1);

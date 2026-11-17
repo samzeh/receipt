@@ -61,18 +61,77 @@ function addSource(
  * PMREM conversion needs a live renderer, so that happens in the stage and
  * this stays headlessly testable.
  */
+/**
+ * A rectangular panel with a soft edge, which is what a softbox actually is.
+ * Ellipses with a quadratic falloff smear into the sky; a mirror needs an
+ * edge to reflect.
+ */
+function addPanel(
+  data: Float32Array,
+  w: number,
+  h: number,
+  cx: number,
+  cy: number,
+  rx: number,
+  ry: number,
+  intensity: number,
+  tint: readonly [number, number, number],
+  softness = 0.3,
+): void {
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const raw = Math.abs(x - cx);
+      const dx = Math.min(raw, w - raw) / rx;
+      const dy = (y - cy) / ry;
+      const d = Math.max(Math.abs(dx), Math.abs(dy));
+      if (d >= 1) continue;
+      const edge = d < 1 - softness ? 1 : (1 - d) / softness;
+      const f = edge * edge * (3 - 2 * edge);
+      const i = (y * w + x) * 4;
+      data[i] = data[i]! + intensity * f * tint[0];
+      data[i + 1] = data[i + 1]! + intensity * f * tint[1];
+      data[i + 2] = data[i + 2]! + intensity * f * tint[2];
+    }
+  }
+}
+
+/** Scales a wedge of azimuth, for carving darkness into a bright room. */
+function darken(
+  data: Float32Array,
+  w: number,
+  h: number,
+  cx: number,
+  rx: number,
+  factor: number,
+): void {
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const raw = Math.abs(x - cx);
+      const d = Math.min(raw, w - raw) / rx;
+      if (d >= 1) continue;
+      const t = 1 - d * d;
+      const k = 1 - (1 - factor) * t * t;
+      const i = (y * w + x) * 4;
+      data[i] = data[i]! * k;
+      data[i + 1] = data[i + 1]! * k;
+      data[i + 2] = data[i + 2]! * k;
+    }
+  }
+}
+
 function studioEnvironment(mode: StudioMode, w = 128, h = 64): DataTexture {
   const light = mode === "light";
-  // Sky and floor levels. On a sweep the backdrop IS the light source, so the
-  // whole dome sits near white and the softboxes only shape it.
-  const sky = light ? 0.95 : 0.112;
-  const floor = light ? 0.42 : 0.012;
+  // The light room is bright on average but has real range. A polished
+  // surface reflects the environment, so a dome that is uniformly near-white
+  // renders a mirror as a flat grey card: it is the darks between the
+  // softboxes that make a reflection read as a reflection.
+  const sky = light ? 0.6 : 0.112;
+  const floor = light ? 0.12 : 0.012;
 
   const data = new Float32Array(w * h * 4);
   for (let y = 0; y < h; y++) {
-    // Darker toward the floor, so there is a horizon for edges to catch.
     const t = y / (h - 1);
-    const v = floor + (1 - t) ** 1.6 * (sky - floor);
+    const v = floor + (1 - t) ** 1.5 * (sky - floor);
     for (let x = 0; x < w; x++) {
       const i = (y * w + x) * 4;
       data[i] = v;
@@ -82,13 +141,27 @@ function studioEnvironment(mode: StudioMode, w = 128, h = 64): DataTexture {
     }
   }
 
-  const gain = light ? 1.9 : 1;
-  // Large warm key softbox, high and to the left of frame.
-  addSource(data, w, h, w * 0.3, h * 0.2, w * 0.17, h * 0.17, 3.4 * gain, [1, 0.96, 0.9]);
-  // Narrow cool strip behind, for a long highlight down a hard edge.
-  addSource(data, w, h, w * 0.82, h * 0.26, w * 0.05, h * 0.2, 2.2 * gain, [0.86, 0.92, 1]);
-  // Floor bounce, so undersides are not black.
-  addSource(data, w, h, w * 0.45, h * 0.84, w * 0.3, h * 0.14, light ? 1.2 : 0.35, [0.95, 0.95, 1]);
+  if (light) {
+    // The camera's side of the room is dark — there is no wall there, just
+    // the lens. Without it a mirror has nothing dark to catch.
+    darken(data, w, h, w * 0.0, w * 0.3, 0.1);
+    darken(data, w, h, w * 0.52, w * 0.12, 0.35);
+
+    // Softboxes bright enough to read as sources in a reflection, but not so
+    // bright that a polished metal reflecting them clips to white and loses
+    // every bit of detail it was carrying.
+    addPanel(data, w, h, w * 0.26, h * 0.16, w * 0.16, h * 0.15, 5.5, [1, 0.98, 0.95], 0.22);
+    // A tall strip to the side, for the long highlight that runs down an edge.
+    addPanel(data, w, h, w * 0.72, h * 0.34, w * 0.045, h * 0.3, 3.2, [0.93, 0.96, 1], 0.25);
+    // A second, smaller overhead box, so reflections have more than one shape.
+    addPanel(data, w, h, w * 0.44, h * 0.1, w * 0.07, h * 0.08, 2.6, [1, 0.99, 0.97], 0.3);
+    // Bright sweep below the horizon: the white floor the card sits over.
+    addPanel(data, w, h, w * 0.3, h * 0.8, w * 0.42, h * 0.16, 0.8, [0.98, 0.98, 1], 0.6);
+  } else {
+    addSource(data, w, h, w * 0.3, h * 0.2, w * 0.17, h * 0.17, 3.4, [1, 0.96, 0.9]);
+    addSource(data, w, h, w * 0.82, h * 0.26, w * 0.05, h * 0.2, 2.2, [0.86, 0.92, 1]);
+    addSource(data, w, h, w * 0.45, h * 0.84, w * 0.3, h * 0.14, 0.35, [0.95, 0.95, 1]);
+  }
 
   const t = new DataTexture(data, w, h, RGBAFormat, FloatType);
   t.needsUpdate = true;
@@ -101,13 +174,16 @@ export function createStudio(aspect: number, mode: StudioMode = "dark"): Studio 
   camera.position.set(0.04, -0.18, 0.42);
   camera.lookAt(0.04, -0.18, 0);
 
-  // On a sweep most of the illumination comes from the environment, so the
-  // lamps are there to place highlights and a shadow, not to do the lifting.
-  const key = new DirectionalLight(0xfff6ea, light ? 2.1 : 3.2);
+  // In the light room the environment does essentially all the lighting. The
+  // lamps only shape a highlight and give something to cast a shadow, and the
+  // ambient is nearly off: an ambient light is a crude stand-in for an
+  // environment, so running both double-counts the same illumination and
+  // flattens everything it touches.
+  const key = new DirectionalLight(0xfff6ea, light ? 0.7 : 3.2);
   key.position.set(-0.3, 0.4, 0.5);
-  const rim = new DirectionalLight(0xdfe8ff, light ? 0.9 : 1.6);
+  const rim = new DirectionalLight(0xdfe8ff, light ? 0.28 : 1.6);
   rim.position.set(0.5, -0.1, -0.45);
-  const fill = new AmbientLight(light ? 0xdfe3ea : 0x404858, light ? 0.5 : 0.35);
+  const fill = new AmbientLight(light ? 0xdfe3ea : 0x404858, light ? 0.06 : 0.35);
 
   return { camera, lights: [key, rim, fill], key, rim, environment: studioEnvironment(mode) };
 }
