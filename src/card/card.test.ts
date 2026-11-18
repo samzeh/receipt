@@ -1,7 +1,7 @@
 import { Box3, Mesh, type MeshPhysicalMaterial, type Object3D } from "three";
 import { describe, expect, it, vi } from "vitest";
 import {
-  CARD, CLOUD_SHAPE, cloudRuns, createCard, NAME_INK, pixelHorizon, valueNoise,
+  CARD, CLOUD_SHAPE, cloudRuns, createCard, NAME_INK, pixelHorizon, surfaceFromInk, valueNoise,
 } from "./card";
 import { CHARACTER_PALETTE, CHARACTER_PIXELS } from "./character";
 
@@ -321,6 +321,43 @@ describe("createCard", () => {
     expect(front.normalScale.x).toBeLessThan(0.5);
 
     card.dispose();
+  });
+
+  it("makes the chip's etched gaps a different surface from its pads", () => {
+    // Pads are polished plating; the gaps are etched down to substrate.
+    // Giving both the same reflection is what made the plate read as one
+    // flat sheet with a pattern painted on it.
+    const pad = surfaceFromInk(220);
+    const gap = surfaceFromInk(160);
+
+    expect(gap.roughness).toBeGreaterThan(pad.roughness * 3);
+    expect(gap.metalness).toBeLessThan(pad.metalness * 0.3);
+    // The pads still have to be polished metal.
+    expect(pad.roughness).toBeLessThan(0.25);
+    expect(pad.metalness).toBeGreaterThan(0.9);
+  });
+
+  it("blends between the two rather than cutting between them", () => {
+    // A hard threshold leaves a jagged edge wherever the materials meet.
+    const samples = [150, 165, 180, 190, 200, 215, 230].map(surfaceFromInk);
+    for (let i = 1; i < samples.length; i++) {
+      expect(samples[i]!.roughness).toBeLessThanOrEqual(samples[i - 1]!.roughness);
+      expect(samples[i]!.metalness).toBeGreaterThanOrEqual(samples[i - 1]!.metalness);
+    }
+    // Somewhere in the middle is genuinely between the two.
+    const mid = surfaceFromInk(185);
+    expect(mid.roughness).toBeGreaterThan(0.3);
+    expect(mid.roughness).toBeLessThan(0.8);
+  });
+
+  it("keeps both properties in range for every possible ink", () => {
+    for (let l = 0; l <= 255; l += 5) {
+      const { roughness, metalness } = surfaceFromInk(l);
+      expect(roughness).toBeGreaterThanOrEqual(0);
+      expect(roughness).toBeLessThanOrEqual(1);
+      expect(metalness).toBeGreaterThanOrEqual(0);
+      expect(metalness).toBeLessThanOrEqual(1);
+    }
   });
 
   it("has a usable ink colour", () => {

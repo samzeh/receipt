@@ -771,27 +771,61 @@ export function makeBrushedNormalMap(size = 512): DataTexture {
  *
  * Returns null without a DOM, so the geometry stays testable in Node.
  */
+/**
+ * How a point on the contact plate behaves, from how bright its ink is.
+ *
+ * The pads are polished plating and the gaps between them are etched away —
+ * they are not the same material, and the gaps expose substrate. Giving both
+ * the same reflection is what makes a chip read as one flat sheet with a
+ * pattern painted on it.
+ *
+ * Pure, so the separation can be checked without a canvas.
+ */
+export function surfaceFromInk(luminance: number): { roughness: number; metalness: number } {
+  const etched = 255 - luminance;
+  // Smoothed across the boundary: a hard threshold puts a jagged edge
+  // wherever the two materials meet.
+  const t = Math.max(0, Math.min(1, (etched - 50) / 32));
+  const blend = t * t * (3 - 2 * t);
+  return {
+    roughness: 0.16 + blend * 0.74,
+    metalness: 1 - blend * 0.88,
+  };
+}
+
 export function makeChipMaps(
   w = 512,
   h = 462,
-): { map: Texture; roughnessMap: Texture } | null {
+): { map: Texture; surface: Texture } | null {
   if (typeof document === "undefined") return null;
-  const canvas = document.createElement("canvas");
-  canvas.width = w;
-  canvas.height = h;
-  const ctx = canvas.getContext("2d");
-  if (!ctx) return null;
+
+  const make = (): CanvasRenderingContext2D | null => {
+    const canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+    return canvas.getContext("2d");
+  };
+  const ctx = make();
+  const maskCtx = make();
+  if (!ctx || !maskCtx) return null;
 
   /** Rounded rectangle as a path, since roundRect is not everywhere. */
-  const roundedPath = (x: number, y: number, rw: number, rh: number, r: number): void => {
+  const roundedPath = (
+    c: CanvasRenderingContext2D,
+    x: number,
+    y: number,
+    rw: number,
+    rh: number,
+    r: number,
+  ): void => {
     const rad = Math.min(r, rw / 2, rh / 2);
-    ctx.beginPath();
-    ctx.moveTo(x + rad, y);
-    ctx.arcTo(x + rw, y, x + rw, y + rh, rad);
-    ctx.arcTo(x + rw, y + rh, x, y + rh, rad);
-    ctx.arcTo(x, y + rh, x, y, rad);
-    ctx.arcTo(x, y, x + rw, y, rad);
-    ctx.closePath();
+    c.beginPath();
+    c.moveTo(x + rad, y);
+    c.arcTo(x + rw, y, x + rw, y + rh, rad);
+    c.arcTo(x + rw, y + rh, x, y + rh, rad);
+    c.arcTo(x, y + rh, x, y, rad);
+    c.arcTo(x, y, x + rw, y, rad);
+    c.closePath();
   };
 
   // Brushed silver, lit from the upper left.
@@ -805,8 +839,16 @@ export function makeChipMaps(
   ctx.fillStyle = base;
   ctx.fillRect(0, 0, w, h);
 
+  // The mask is flat white — no gradient. Shading belongs to the colour, not
+  // to which material a point is: reading the surface back out of a shaded
+  // image made the dark end of the gradient look exactly like an etched gap,
+  // and the bottom of the plate stopped reflecting.
+  maskCtx.fillStyle = "#ffffff";
+  maskCtx.fillRect(0, 0, w, h);
+
   // The fine mesh across the plate. Barely visible up close and entirely
-  // responsible for it not looking like flat paint.
+  // responsible for it not looking like flat paint. Colour only: it is
+  // texture, not a different material.
   ctx.strokeStyle = "rgba(122,127,134,0.16)";
   ctx.lineWidth = 1;
   ctx.beginPath();
@@ -825,43 +867,52 @@ export function makeChipMaps(
   const top = h * 0.07;
   const bottom = h * 0.93;
 
-  // Etched gaps between contacts. A groove in bright plating is only a little
-  // darker than the plating around it; pushing it dark turns the chip into a
-  // line drawing.
-  ctx.strokeStyle = "#a3a9b1";
-  ctx.lineWidth = Math.round(w * 0.014);
-  ctx.lineCap = "round";
-  ctx.beginPath();
-  // Columns.
-  ctx.moveTo(left, top);
-  ctx.lineTo(left, bottom);
-  ctx.moveTo(right, top);
-  ctx.lineTo(right, bottom);
-  // Three pads down each side.
-  for (const y of [h * 0.36, h * 0.64]) {
-    ctx.moveTo(w * 0.06, y);
-    ctx.lineTo(left, y);
-    ctx.moveTo(right, y);
-    ctx.lineTo(w * 0.94, y);
-  }
-  // Angled cuts at the bottom corners.
-  ctx.moveTo(w * 0.06, h * 0.84);
-  ctx.lineTo(w * 0.15, h * 0.945);
-  ctx.moveTo(w * 0.94, h * 0.84);
-  ctx.lineTo(w * 0.85, h * 0.945);
-  ctx.stroke();
+  /** Everything that is etched away, drawn into both canvases at once. */
+  const etched = (c: CanvasRenderingContext2D, ink: string, rim: string): void => {
+    // A groove in bright plating is only a little darker than the plating
+    // around it; pushing it dark turns the chip into a line drawing.
+    c.strokeStyle = ink;
+    c.lineWidth = Math.round(w * 0.014);
+    c.lineCap = "round";
+    c.beginPath();
+    c.moveTo(left, top);
+    c.lineTo(left, bottom);
+    c.moveTo(right, top);
+    c.lineTo(right, bottom);
+    for (const y of [h * 0.36, h * 0.64]) {
+      c.moveTo(w * 0.06, y);
+      c.lineTo(left, y);
+      c.moveTo(right, y);
+      c.lineTo(w * 0.94, y);
+    }
+    // Angled cuts at the bottom corners.
+    c.moveTo(w * 0.06, h * 0.84);
+    c.lineTo(w * 0.15, h * 0.945);
+    c.moveTo(w * 0.94, h * 0.84);
+    c.lineTo(w * 0.85, h * 0.945);
+    c.stroke();
 
-  // The waisted central island: wide through the middle, pinched top and
-  // bottom. It is the shape that makes a chip read as a chip.
-  ctx.beginPath();
-  ctx.moveTo(w * 0.43, top + h * 0.06);
-  ctx.bezierCurveTo(w * 0.355, h * 0.26, w * 0.355, h * 0.74, w * 0.43, bottom - h * 0.06);
-  ctx.lineTo(w * 0.57, bottom - h * 0.06);
-  ctx.bezierCurveTo(w * 0.645, h * 0.74, w * 0.645, h * 0.26, w * 0.57, top + h * 0.06);
-  ctx.closePath();
-  ctx.stroke();
+    // The waisted central island: wide through the middle, pinched top and
+    // bottom. It is the shape that makes a chip read as a chip.
+    c.beginPath();
+    c.moveTo(w * 0.43, top + h * 0.06);
+    c.bezierCurveTo(w * 0.355, h * 0.26, w * 0.355, h * 0.74, w * 0.43, bottom - h * 0.06);
+    c.lineTo(w * 0.57, bottom - h * 0.06);
+    c.bezierCurveTo(w * 0.645, h * 0.74, w * 0.645, h * 0.26, w * 0.57, top + h * 0.06);
+    c.closePath();
+    c.stroke();
 
-  // Bond-wire dots in a couple of the pads.
+    // A soft rim, so the plate reads as set into the card.
+    c.strokeStyle = rim;
+    c.lineWidth = Math.round(w * 0.018);
+    roundedPath(c, c.lineWidth / 2, c.lineWidth / 2, w - c.lineWidth, h - c.lineWidth, w * 0.11);
+    c.stroke();
+  };
+
+  etched(ctx, "#a3a9b1", "rgba(166,172,180,0.6)");
+  etched(maskCtx, "#000000", "rgba(0,0,0,0.75)");
+
+  // Bond-wire dots, colour only: they are a mark on a pad, not a cut into it.
   ctx.fillStyle = "rgba(164,170,178,0.75)";
   const dots: [number, number][] = [
     [0.18, 0.5],
@@ -875,49 +926,28 @@ export function makeChipMaps(
     ctx.fill();
   }
 
-  // A soft rim, so the plate reads as set into the card.
-  ctx.strokeStyle = "rgba(166,172,180,0.6)";
-  ctx.lineWidth = Math.round(w * 0.018);
-  roundedPath(
-    ctx.lineWidth / 2,
-    ctx.lineWidth / 2,
-    w - ctx.lineWidth,
-    h - ctx.lineWidth,
-    w * 0.11,
-  );
-  ctx.stroke();
-
-  const map = new CanvasTexture(canvas);
+  const map = new CanvasTexture(ctx.canvas);
   map.colorSpace = SRGBColorSpace;
   map.needsUpdate = true;
 
-  // Roughness derived from the art rather than drawn twice: the polished pads
-  // are the bright areas and the etched gaps are the dark ones, so inverting
-  // luminance gives smooth pads and matte etching for free.
-  const roughCanvas = document.createElement("canvas");
-  roughCanvas.width = w;
-  roughCanvas.height = h;
-  const roughCtx = roughCanvas.getContext("2d");
-  if (!roughCtx) return null;
-  const image = ctx.getImageData(0, 0, w, h);
+  // One map carrying both properties: three takes roughness from the green
+  // channel and metalness from the blue, so the pads come out polished metal
+  // and the gaps matte substrate.
+  const image = maskCtx.getImageData(0, 0, w, h);
   const pixels = image.data;
   for (let i = 0; i < pixels.length; i += 4) {
-    // Compressed, not a straight inversion. The etched gaps are the same
-    // plating as the pads — just recessed — so they stay reflective. Letting
-    // them run to full roughness makes them read as matte ink drawn on
-    // plastic rather than as grooves cut into metal.
-    const inverted = 255 - pixels[i]!;
-    const rough = Math.round(26 + inverted * 0.26);
-    pixels[i] = rough;
-    pixels[i + 1] = rough;
-    pixels[i + 2] = rough;
+    const { roughness, metalness } = surfaceFromInk(pixels[i]!);
+    pixels[i] = 0;
+    pixels[i + 1] = Math.round(roughness * 255);
+    pixels[i + 2] = Math.round(metalness * 255);
+    pixels[i + 3] = 255;
   }
-  roughCtx.putImageData(image, 0, 0);
+  maskCtx.putImageData(image, 0, 0);
 
-  const roughnessMap = new CanvasTexture(roughCanvas);
-  roughnessMap.needsUpdate = true;
+  const surface = new CanvasTexture(maskCtx.canvas);
+  surface.needsUpdate = true;
 
-  return { map, roughnessMap };
+  return { map, surface };
 }
 
 export function createCard(): Card {
@@ -1016,14 +1046,21 @@ export function createCard(): Card {
   const chipMat = new MeshPhysicalMaterial({
     color: chipMaps ? 0xffffff : 0xdfe2e6,
     map: chipMaps?.map ?? null,
-    roughnessMap: chipMaps?.roughnessMap ?? null,
-    metalness: 1,
+    // One map drives both: green is roughness, blue is metalness. The pads
+    // come out polished plating and the etched gaps matte substrate, which
+    // they are — giving both the same reflection is what made the plate read
+    // as a flat sheet with a pattern painted on it.
+    roughnessMap: chipMaps?.surface ?? null,
+    metalnessMap: chipMaps?.surface ?? null,
+    // These stay as overall dials: the map scales against them, so turning
+    // this down still dulls the whole plate.
+    metalness: 0.5,
     roughness: chipMaps ? 1 : 0.18,
     clearcoat: 0,
     // Metal reflects nearly all of what hits it, so this multiplies straight
-    // into the highlight. Above about 1 the plate clips and the etched
-    // pattern disappears into flat white.
-    envMapIntensity: 0.85,
+    // into the highlight. Turn this down first if the plate is too bright
+    // head on; it scales the reflection without touching the surface.
+    envMapIntensity: 0.80,
   });
 
   const chipThickness = 0.00016;
@@ -1139,7 +1176,7 @@ export function createCard(): Card {
       for (const sticker of applied) sticker.dispose();
       applied.length = 0;
       chipMaps?.map.dispose();
-      chipMaps?.roughnessMap.dispose();
+      chipMaps?.surface.dispose();
       for (const m of materials) m.dispose();
       group.clear();
     },
