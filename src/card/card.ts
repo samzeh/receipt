@@ -993,15 +993,17 @@ export function createCard(): Card {
     return g;
   };
 
+  const LIFT = 1.6e-5;
+
   const front = new Mesh(facePlate(), frontMat);
   front.name = "front";
-  front.position.z = CARD.thickness / 2 + 2e-6;
+  front.position.z = CARD.thickness / 2 + LIFT;
   group.add(front);
 
 
   const back = new Mesh(facePlate(), backMat);
   back.name = "back";
-  back.position.z = -CARD.thickness / 2 - 2e-6;
+  back.position.z = -CARD.thickness / 2 - LIFT;
   back.rotation.y = Math.PI;
   group.add(back);
 
@@ -1068,7 +1070,7 @@ export function createCard(): Card {
   // Clear of the printed face by more than the face is clear of the
   // substrate, and drawn after everything else: the name is the last thing
   // applied to a card, and nothing on it should ever cross in front.
-  nameMesh.position.set(CARD.nameX, CARD.nameY, CARD.thickness / 2 + 2.4e-5);
+  nameMesh.position.set(CARD.nameX, CARD.nameY, CARD.thickness / 2 + LIFT * 2);
   nameMesh.renderOrder = 10;
   group.add(nameMesh);
 
@@ -1078,7 +1080,7 @@ export function createCard(): Card {
   const stickers = new Group();
   stickers.name = "stickers";
   stickers.rotation.y = Math.PI;
-  stickers.position.z = -(CARD.thickness / 2 + 1.4e-5);
+  stickers.position.z = -(CARD.thickness / 2 + LIFT * 2);
   group.add(stickers);
   const applied: Sticker[] = [];
 
