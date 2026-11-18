@@ -1,7 +1,8 @@
 import { Box3, Mesh, type MeshPhysicalMaterial, type Object3D } from "three";
 import { describe, expect, it, vi } from "vitest";
 import {
-  CARD, CLOUD_SHAPE, cloudRuns, createCard, NAME_INK, pixelHorizon, surfaceFromInk, valueNoise,
+  BACK_LAYOUT, CARD, CLOUD_SHAPE, type CloudRun, cloudRuns, createCard, DISPLAY_LAYOUT, NAME_INK,
+  pixelHorizon, surfaceFromInk, valueNoise,
 } from "./card";
 import { CHARACTER_PALETTE, CHARACTER_PIXELS } from "./character";
 
@@ -156,29 +157,61 @@ describe("createCard", () => {
     }
   });
 
-  it("builds clouds that are widest through the middle of the stack", () => {
+  /** A cloud's bars from the ground up, whatever order they were built in. */
+  function fromBaseUp(runs: readonly CloudRun[]): CloudRun[] {
+    return [...runs].sort((a, b) => b.y - a.y);
+  }
+
+  it("never hangs a cloud bar out over nothing", () => {
+    // A bar reaching past the one beneath it leaves a ledge with open sky
+    // under it, which is the one thing a stack of blocks cannot do.
+    for (const seed of [0x3f21, 0x8ad4, 0x16bc, 0x5d08, 0x2e97, 0xc4a1]) {
+      const stack = fromBaseUp(cloudRuns(24, seed));
+      for (let i = 1; i < stack.length; i++) {
+        const above = stack[i]!;
+        const below = stack[i - 1]!;
+        expect(above.x).toBeGreaterThanOrEqual(below.x);
+        expect(above.x + above.width).toBeLessThanOrEqual(below.x + below.width);
+      }
+    }
+  });
+
+  it("tapers a cloud from a wide base to a narrow top", () => {
     // Stacked bars of equal width read as a brick. The taper is the cloud.
-    const runs = cloudRuns(24, 0x3f21);
+    const stack = fromBaseUp(cloudRuns(24, 0x3f21));
 
-    expect(runs).toHaveLength(CLOUD_SHAPE.length);
-    const widest = runs.reduce((a, b) => (b.width > a.width ? b : a));
-    expect(widest.y).toBeGreaterThan(0);
-    expect(widest.y).toBeLessThan(runs.length - 1);
+    expect(stack).toHaveLength(CLOUD_SHAPE.length);
+    expect(stack[stack.length - 1]!.width).toBeLessThan(stack[0]!.width * 0.6);
   });
 
-  it("keeps clouds far wider than they are tall", () => {
-    // The reference clouds are flat streaks. A cloud as tall as it is wide
-    // reads as a lump sitting in the sky rather than drifting across it.
+  it("stacks a cloud thick enough to have a body", () => {
+    // Four bars made a streak with no weight to it. These are clouds, and a
+    // cloud has some depth to it even when it is a wide one.
     const runs = cloudRuns(24, 0x3f21);
     const widest = runs.reduce((a, b) => (b.width > a.width ? b : a));
 
-    expect(widest.width / runs.length).toBeGreaterThan(3);
+    expect(runs.length).toBeGreaterThanOrEqual(6);
+    expect(widest.width / runs.length).toBeLessThan(5);
   });
 
-  it("starts a cloud with a narrow bar above its body", () => {
-    const runs = cloudRuns(24, 0x8ad4);
+  it("keeps clouds wider than they are tall", () => {
+    // Thicker, but still drifting past rather than looming: a cloud as tall
+    // as it is wide is a lump sitting in the sky.
+    const runs = cloudRuns(24, 0x3f21);
+    const widest = runs.reduce((a, b) => (b.width > a.width ? b : a));
 
-    expect(runs[0]!.width).toBeLessThan(runs[2]!.width * 0.6);
+    expect(widest.width / runs.length).toBeGreaterThan(2.5);
+  });
+
+  it("puts the back's clouds somewhere other than the front's", () => {
+    // The same sky on both faces gives away that it is one picture printed
+    // twice.
+    expect(BACK_LAYOUT.clouds).toHaveLength(DISPLAY_LAYOUT.clouds.length);
+    for (let i = 0; i < BACK_LAYOUT.clouds.length; i++) {
+      const back = BACK_LAYOUT.clouds[i]!;
+      const front = DISPLAY_LAYOUT.clouds[i]!;
+      expect([back.x, back.y]).not.toEqual([front.x, front.y]);
+    }
   });
 
   it("keeps every cloud run inside its own width", () => {

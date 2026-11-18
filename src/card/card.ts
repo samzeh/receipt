@@ -241,26 +241,83 @@ export interface CloudRun {
 }
 
 /**
- * Width of each bar as a fraction of the cloud's own width.
+ * Everything about a cloud's silhouette, in one place.
  *
- * A narrow bar on top, a wide body, a tapered underside — four bars for a
- * cloud three or four times as wide as it is tall. Six bars of similar width
- * makes a lump; this is what makes it drift.
+ * These numbers were dialled in by hand against the reference, which is the
+ * only way a shape like this gets settled — so change them by looking, not by
+ * reasoning about them.
  */
-export const CLOUD_SHAPE: readonly number[] = [0.38, 0.9, 1, 0.68];
+export const CLOUD_LOOK = {
+  /**
+   * Width of each bar, base first, as a fraction of the cloud's own width.
+   *
+   * Non-increasing: a bar wider than the one beneath it hangs over open sky.
+   * Read as a continuous profile, so it is the curve that matters and not the
+   * number of entries.
+   */
+  shape: [0.83, 0.79, 0.62, 0.49, 0.41, 0.2],
+  /**
+   * Roughly how many times wider than tall a cloud comes out.
+   *
+   * Height follows width rather than being fixed, because the two layouts are
+   * the same scene at very different sizes: six bars across the game's little
+   * nine-block clouds would stack them into pyramids.
+   */
+  aspect: 3.2,
+  /**
+   * How symmetrical a cloud is: 1 centres every bar over the base, 0 lets
+   * each one sit anywhere the bar below allows.
+   *
+   * The single biggest lever on how a cloud reads. Centred is the storybook
+   * blob; loose is a ragged drift.
+   */
+  centre: 0.43,
+};
+
+/** Kept for the tests and for anyone reading the shape rather than tuning it. */
+export const CLOUD_SHAPE: readonly number[] = CLOUD_LOOK.shape;
+
+/** `shape` read as a continuous profile, so it can be resampled to any height. */
+function profileAt(shape: readonly number[], t: number): number {
+  const p = t * (shape.length - 1);
+  const i = Math.floor(p);
+  const next = Math.min(shape.length - 1, i + 1);
+  return shape[i]! + (shape[next]! - shape[i]!) * (p - i);
+}
 
 /**
- * One cloud, as a stack of horizontal runs.
+ * One cloud, as a stack of horizontal runs built up from its base.
+ *
+ * Each bar is laid inside the span of the bar below it. Choosing every bar's
+ * offset independently is what let one poke out over nothing; nesting them
+ * makes an overhang impossible rather than unlikely.
+ *
+ * Built base first, so that a cloud shrinking into the game loses bars off
+ * its top while the ones below keep the offsets they already had.
  *
  * Pure, so the shape is testable without a canvas.
  */
-export function cloudRuns(width: number, seed: number, shape = CLOUD_SHAPE): CloudRun[] {
+export function cloudRuns(width: number, seed: number, shape = CLOUD_LOOK.shape): CloudRun[] {
   const rand = mulberry32(seed);
-  return shape.map((fraction, r) => {
-    const w = Math.max(2, Math.round(width * fraction * (0.86 + rand() * 0.14)));
-    const x = Math.round((width - w) * rand());
-    return { x, y: r, width: w };
-  });
+  const aspect = Math.max(0.5, CLOUD_LOOK.aspect);
+  const centre = Math.max(0, Math.min(1, CLOUD_LOOK.centre));
+  const rows = Math.max(1, Math.min(shape.length, Math.round(width / aspect)));
+  const runs: CloudRun[] = [];
+  let lo = 0;
+  let hi = width;
+  for (let i = 0; i < rows; i++) {
+    const fraction = profileAt(shape, rows === 1 ? 0 : i / (rows - 1));
+    // Clamped to what the bar below leaves available, so the nesting holds
+    // even where the profile does not taper fast enough for a narrow cloud.
+    const w = Math.max(2, Math.min(Math.round(width * fraction), hi - lo));
+    const slack = Math.max(0, hi - lo - w);
+    const loose = slack * rand();
+    const x = Math.round(lo + loose + (slack / 2 - loose) * centre);
+    runs.push({ x, y: rows - 1 - i, width: w });
+    lo = x;
+    hi = x + w;
+  }
+  return runs;
 }
 
 /** Sky, and the hills in the order they are painted: highest band first. */
@@ -319,9 +376,25 @@ export const DISPLAY_LAYOUT: FaceLayout = {
   bases: [0.76, 0.87, 0.94],
   rises: [0.11, 0.07, 0.04],
   clouds: [
-    { x: 12, y: 18, width: 102, seed: 0x3f21 },
-    { x: 144, y: 36, width: 90, seed: 0x8ad4 },
-    { x: 216, y: 6, width: 72, seed: 0x16bc },
+    { x: 0, y: 32, width: 120, seed: 0x3f21 },
+    { x: 162, y: 82, width: 96, seed: 0x8ad4 },
+    { x: 248, y: 18, width: 72, seed: 0x16bc },
+  ],
+};
+
+/**
+ * The back of the card: the same sky and hills, with the clouds elsewhere.
+ *
+ * An identical sky on both faces is what gives away that it is one picture
+ * printed twice — and with no character to sit behind, the back has the room
+ * to put them somewhere else.
+ */
+export const BACK_LAYOUT: FaceLayout = {
+  ...DISPLAY_LAYOUT,
+  clouds: [
+    { x: 68, y: 18, width: 108, seed: 0x5d08 },
+    { x: 198, y: 62, width: 120, seed: 0x2e97 },
+    { x: 6, y: 94, width: 66, seed: 0xc4a1 },
   ],
 };
 
@@ -338,10 +411,20 @@ export const GAME_LAYOUT: FaceLayout = {
   // under you rather than you moving over it, and the character's feet would
   // leave the surface on every rise.
   rises: [0, 0, 0],
+  // Smaller than the resting card, because the whole scene pulls back — but
+  // only by about a quarter. Taken much further they stop reading as clouds
+  // and start reading as specks of dust on the sky.
+  //
+  // Spread down the sky rather than banked along the top: with the horizon
+  // dropped to a strip there is a lot of open blue, and clouds only in the
+  // top third leave the middle of the card empty. The lowest still stops well
+  // above the geese, which is the part that has to stay readable — the
+  // character passing in front of one mid-jump is fine, and is the only thing
+  // that shows the sky is moving at all.
   clouds: [
-    { x: 24, y: 30, width: 56, seed: 0x3f21 },
-    { x: 150, y: 46, width: 46, seed: 0x8ad4 },
-    { x: 232, y: 16, width: 40, seed: 0x16bc },
+    { x: 16, y: 20, width: 90, seed: 0x3f21 },
+    { x: 168, y: 92, width: 72, seed: 0x8ad4 },
+    { x: 246, y: 48, width: 60, seed: 0x16bc },
   ],
 };
 
@@ -404,6 +487,7 @@ export interface Face {
 
 export function makeFace(
   withCharacter = true,
+  initial: FaceLayout = DISPLAY_LAYOUT,
   cols = 300,
   rows = 192,
 ): Face | null {
@@ -439,7 +523,8 @@ export function makeFace(
       const x = drift + run.x * unit;
       const y = cloud.y + run.y * unit;
       const w = run.width * unit;
-      ctx.fillStyle = i === runs.length - 1 ? CLOUD_EDGE : CLOUD_BODY;
+      // Runs come back base first, and the base is the shaded underside.
+      ctx.fillStyle = i === 0 ? CLOUD_EDGE : CLOUD_BODY;
       ctx.fillRect(px(x), px(y), px(x + w) - px(x), px(y + unit) - px(y));
       // Tint both ends, so each bar has a defined edge instead of stopping.
       ctx.fillStyle = CLOUD_EDGE;
@@ -598,7 +683,7 @@ export function makeFace(
     }
   };
 
-  paint(DISPLAY_LAYOUT);
+  paint(initial);
 
   const map = new CanvasTexture(canvas);
   map.colorSpace = SRGBColorSpace;
@@ -985,7 +1070,7 @@ export function createCard(): Card {
 
   // The front is redrawn as the layout moves; the back never changes.
   const face = makeFace(true);
-  const backFace = makeFace(false);
+  const backFace = makeFace(false, BACK_LAYOUT);
 
   // The substrate carries the front artwork too, so the card's edge is
   // printed rather than a dark rim. planarUV puts the side walls on the
