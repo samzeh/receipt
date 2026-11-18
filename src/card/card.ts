@@ -620,6 +620,110 @@ export function makeFace(
 }
 
 /**
+ * Smooth, tileable value noise in 0..1.
+ *
+ * Tileable matters: these maps repeat across the card, and a lattice that
+ * does not wrap puts a visible seam down it. Pure, so the shape of the noise
+ * can be checked without a canvas.
+ */
+export function valueNoise(size: number, cells: number, seed: number): Float32Array {
+  const rand = mulberry32(seed);
+  const lattice = new Float32Array(cells * cells);
+  for (let i = 0; i < lattice.length; i++) lattice[i] = rand();
+
+  // Wrapping the lookup is what makes it tile.
+  const at = (cx: number, cy: number): number =>
+    lattice[(((cy % cells) + cells) % cells) * cells + (((cx % cells) + cells) % cells)]!;
+  const smooth = (t: number): number => t * t * (3 - 2 * t);
+
+  const out = new Float32Array(size * size);
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const fx = (x / size) * cells;
+      const fy = (y / size) * cells;
+      const x0 = Math.floor(fx);
+      const y0 = Math.floor(fy);
+      const tx = smooth(fx - x0);
+      const ty = smooth(fy - y0);
+      const top = at(x0, y0) * (1 - tx) + at(x0 + 1, y0) * tx;
+      const bottom = at(x0, y0 + 1) * (1 - tx) + at(x0 + 1, y0 + 1) * tx;
+      out[y * size + x] = top * (1 - ty) + bottom * ty;
+    }
+  }
+  return out;
+}
+
+/**
+ * The card's printed tooth, as a normal map.
+ *
+ * Two octaves of noise turned into a height field, then differenced into
+ * normals. A card is not a mirror and it is not sandpaper: the grain has to
+ * be fine enough that you read it as surface rather than as bumps, which is
+ * why the fine octave carries most of the amplitude.
+ */
+export function makeCardGrain(size = 512): DataTexture {
+  const fine = valueNoise(size, 96, 0x9c41);
+  const broad = valueNoise(size, 18, 0x3ad7);
+  const height = new Float32Array(size * size);
+  for (let i = 0; i < height.length; i++) height[i] = fine[i]! * 0.7 + broad[i]! * 0.3;
+
+  const at = (x: number, y: number): number =>
+    height[(((y % size) + size) % size) * size + (((x % size) + size) % size)]!;
+
+  const data = new Uint8Array(size * size * 4);
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const dx = at(x + 1, y) - at(x - 1, y);
+      const dy = at(x, y + 1) - at(x, y - 1);
+      const i = (y * size + x) * 4;
+      data[i] = Math.max(0, Math.min(255, Math.round(128 - dx * 320)));
+      data[i + 1] = Math.max(0, Math.min(255, Math.round(128 - dy * 320)));
+      data[i + 2] = 255;
+      data[i + 3] = 255;
+    }
+  }
+
+  const t = new DataTexture(data, size, size, RGBAFormat);
+  t.wrapS = RepeatWrapping;
+  t.wrapT = RepeatWrapping;
+  t.minFilter = LinearMipmapLinearFilter;
+  t.magFilter = LinearFilter;
+  t.generateMipmaps = true;
+  // Fine enough that a texel lands well inside a tenth of a millimetre.
+  t.repeat.set(5, 3);
+  t.needsUpdate = true;
+  return t;
+}
+
+/**
+ * Broad variation in how rough the surface is, from handling.
+ *
+ * Uniform roughness is the strongest tell that a surface was computed: real
+ * light never falls evenly across a card, because the card is never evenly
+ * worn. three multiplies the material's roughness by this map's green
+ * channel, so the values sit just under 1.
+ */
+export function makeCardWear(size = 256): DataTexture {
+  const noise = valueNoise(size, 6, 0x5be2);
+  const data = new Uint8Array(size * size * 4);
+  for (let i = 0; i < noise.length; i++) {
+    const v = Math.round((0.84 + noise[i]! * 0.16) * 255);
+    data[i * 4] = v;
+    data[i * 4 + 1] = v;
+    data[i * 4 + 2] = v;
+    data[i * 4 + 3] = 255;
+  }
+  const t = new DataTexture(data, size, size, RGBAFormat);
+  t.wrapS = RepeatWrapping;
+  t.wrapT = RepeatWrapping;
+  t.minFilter = LinearMipmapLinearFilter;
+  t.magFilter = LinearFilter;
+  t.generateMipmaps = true;
+  t.needsUpdate = true;
+  return t;
+}
+
+/**
  * Brushed metal, as fine directional scratches.
  *
  * A metal surface with a perfectly smooth normal reflects the environment
@@ -820,24 +924,33 @@ export function createCard(): Card {
   const group = new Group();
   group.name = "card";
 
-  const brushed = makeBrushedNormalMap();
   // A printed card under lacquer, not bare metal. On a metal a colour map is
   // reflectance tint, so artwork would render as tinted chrome rather than as
   // print; the ink has to sit on a dielectric. The clearcoat is the laminate,
   // and it is what keeps the chip reading as the one metal thing on the card.
   // Matte print, deliberately unlacquered.
+  const grain = makeCardGrain();
+  const wear = makeCardWear();
   const printed = (map: Texture | null, fallback: number): MeshPhysicalMaterial =>
     new MeshPhysicalMaterial({
       color: map ? 0xffffff : fallback,
       map,
       metalness: 0,
-      roughness: 0.72,
-      normalMap: brushed,
-      // Very faint: a strong micro-normal smears the pixel edges, which is
-      // the one thing this artwork cannot survive.
-      normalScale: new Vector2(0.03, 0.03),
+      roughness: 0.74,
+      // Roughness varies across the card, so light falls on it unevenly.
+      // A single value everywhere is what made it read as a flat panel.
+      roughnessMap: wear,
+      // Printed tooth. Enough to catch a grazing light, held back from the
+      // point where it starts smearing the pixel edges.
+      normalMap: grain,
+      normalScale: new Vector2(0.22, 0.22),
+      // Paper scatters at glancing angles; this is what gives an edge its
+      // soft falloff rather than a hard terminator.
+      sheen: 0.18,
+      sheenRoughness: 0.85,
+      sheenColor: 0xbfc8b4,
       clearcoat: 0,
-      envMapIntensity: 0.45,
+      envMapIntensity: 0.62,
     });
 
   // The front is redrawn as the layout moves; the back never changes.
@@ -1016,7 +1129,8 @@ export function createCard(): Card {
         for (const m of Array.isArray(o.material) ? o.material : [o.material]) materials.add(m);
       });
       for (const g of geometries) g.dispose();
-      brushed.dispose();
+      grain.dispose();
+      wear.dispose();
       face?.texture.dispose();
       backFace?.texture.dispose();
       nameMap?.texture.dispose();

@@ -1,6 +1,8 @@
 import { Box3, Mesh, type MeshPhysicalMaterial, type Object3D } from "three";
 import { describe, expect, it, vi } from "vitest";
-import { CARD, CLOUD_SHAPE, cloudRuns, createCard, NAME_INK, pixelHorizon } from "./card";
+import {
+  CARD, CLOUD_SHAPE, cloudRuns, createCard, NAME_INK, pixelHorizon, valueNoise,
+} from "./card";
 import { CHARACTER_PALETTE, CHARACTER_PIXELS } from "./character";
 
 function meshNamed(root: Object3D, name: string): Mesh {
@@ -265,6 +267,60 @@ describe("createCard", () => {
 
   it("keeps the name in caps", () => {
     expect(CARD.name).toBe(CARD.name.toUpperCase());
+  });
+
+  it("makes noise that tiles without a seam", () => {
+    // These maps repeat across the card. A lattice that does not wrap puts a
+    // visible line down it, which looks like a crease in the card.
+    const size = 64;
+    const noise = valueNoise(size, 8, 0x1234);
+    for (let y = 0; y < size; y++) {
+      const left = noise[y * size]!;
+      const right = noise[y * size + size - 1]!;
+      // Adjacent across the wrap, so they must be close, not equal.
+      expect(Math.abs(left - right)).toBeLessThan(0.2);
+    }
+  });
+
+  it("makes noise that is smooth, not static", () => {
+    // White noise would alias into sparkle once the card is minified.
+    const size = 64;
+    const noise = valueNoise(size, 6, 0x4321);
+    let worst = 0;
+    for (let y = 0; y < size; y++) {
+      for (let x = 1; x < size; x++) {
+        worst = Math.max(worst, Math.abs(noise[y * size + x]! - noise[y * size + x - 1]!));
+      }
+    }
+    expect(worst).toBeLessThan(0.25);
+  });
+
+  it("keeps the noise inside its range and actually varying", () => {
+    const noise = valueNoise(48, 5, 0x9999);
+    let min = Infinity;
+    let max = -Infinity;
+    for (const v of noise) {
+      min = Math.min(min, v);
+      max = Math.max(max, v);
+    }
+    expect(min).toBeGreaterThanOrEqual(0);
+    expect(max).toBeLessThanOrEqual(1);
+    expect(max - min).toBeGreaterThan(0.4);
+  });
+
+  it("gives the printed face varying roughness and a grain", () => {
+    // One roughness value across the whole card is what made it read as a
+    // flat panel: light never falls unevenly on it.
+    const card = createCard();
+    const front = meshNamed(card.group, "front").material as MeshPhysicalMaterial;
+
+    expect(front.roughnessMap).not.toBeNull();
+    expect(front.normalMap).not.toBeNull();
+    expect(front.normalScale.x).toBeGreaterThan(0.1);
+    // But not so much that it smears the pixel art.
+    expect(front.normalScale.x).toBeLessThan(0.5);
+
+    card.dispose();
   });
 
   it("has a usable ink colour", () => {
