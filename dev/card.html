@@ -4,6 +4,23 @@
 <style>
   html, body { margin: 0; height: 100%; background: #f2f0ec; overflow: hidden; }
   #stage { position: fixed; inset: 0; }
+  /* Fixed to the bottom of the viewport, centred, and deliberately quiet:
+     it is a hint, not a label. pointer-events stays off so it can never
+     swallow a click meant for the card. */
+  #hint {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 20px;
+    text-align: center;
+    font: 600 11px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: #9b978e;
+    pointer-events: none;
+    user-select: none;
+  }
 </style>
 <div id="stage"></div>
+<p id="hint">[ esc ] exit game &nbsp;-&nbsp; [ double click ] enter game</p>
 <script type="module" src="./card.ts"></script>
