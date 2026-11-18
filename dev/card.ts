@@ -1,9 +1,12 @@
 import { Raycaster, Vector2 } from "three";
 import { createStage, defaultStageDeps } from "../src/core/stage";
 import { CARD, createCard } from "../src/card/card";
+import { GAME_LAYOUT } from "../src/card/card";
+import { createGame, type Game } from "../src/card/game";
 import {
   createPoseTween, nearestFront, nextHalfTurn, squareFront, type Pose,
 } from "../src/card/pose";
+import { CHARACTER_SIZE, GOOSE_SIZE } from "../src/card/sprites";
 
 // The card on an off-white field. No ground, no shadow, no orbit: the camera
 // is fixed and the only thing that moves is the card.
@@ -52,6 +55,28 @@ let since = 0;
  *  be redirected mid-flight when you come straight back out. */
 let mix = 0;
 let mixTarget = 0;
+/** The runner. Exists only while the card is the playfield. */
+let game: Game | null = null;
+let best = 0;
+
+function startGame(): void {
+  game = createGame({
+    width: 300,
+    character: { x: GAME_LAYOUT.characterAt.x, ...CHARACTER_SIZE },
+    goose: { ...GOOSE_SIZE },
+    seed: Math.floor(Math.random() * 0xffffffff),
+  });
+}
+
+/** Space, tap or click: jump, or go again once it is over. */
+function act(): void {
+  if (phase !== "ready" || !game) return;
+  if (game.state.over) {
+    startGame();
+    return;
+  }
+  game.jump();
+}
 
 const clampPitch = (v: number): number => Math.max(-PITCH_LIMIT, Math.min(PITCH_LIMIT, v));
 
@@ -78,6 +103,19 @@ const stage = createStage(
       if (dt > 0 && Math.abs(mixTarget - mix) > 0.0005) {
         mix += (mixTarget - mix) * (1 - Math.exp(-dt * 4.5));
         card.setGameMix(mix);
+      } else if (phase === "ready" && game && dt > 0) {
+        const wasOver = game.state.over;
+        game.step(dt);
+        if (game.state.over && !wasOver) best = Math.max(best, game.state.score);
+        card.renderGame({
+          pose: game.pose,
+          lift: game.state.lift,
+          scroll: game.state.distance,
+          geese: game.state.geese.map((g) => ({ x: g.x, alert: g.alert })),
+          score: game.state.score,
+          over: game.state.over,
+          best: best > 0 ? best : undefined,
+        });
       }
       card.group.rotation.set(view.pose.rotX, view.pose.rotY, 0);
       // Live pose readout, throttled: handy for reading a pose you like back
@@ -129,8 +167,8 @@ function enter(): void {
     mixTarget = 1;
     moveTo({ zoom: GAME_ZOOM }, ZOOM_TIME, () => {
       phase = "ready";
+      startGame();
       report();
-      // The game starts here.
     });
   });
   report();
@@ -139,6 +177,7 @@ function enter(): void {
 function exit(): void {
   if (phase === "idle") return;
   phase = "idle";
+  game = null;
   velX = 0;
   velY = 0;
   mixTarget = 0;
@@ -170,6 +209,10 @@ function overCard(e: PointerEvent): boolean {
 }
 
 canvas.addEventListener("pointerdown", (e) => {
+  if (phase === "ready") {
+    act();
+    return;
+  }
   if (phase !== "idle") return;
   dragging = true;
   lastX = e.clientX;
@@ -243,6 +286,10 @@ canvas.addEventListener(
 // Always a way back out, so a secret cannot strand you in it.
 addEventListener("keydown", (e) => {
   if (e.key === "Escape") exit();
+  if (e.code === "Space" || e.code === "ArrowUp") {
+    e.preventDefault();
+    act();
+  }
 });
 
 // --- hud --------------------------------------------------------------------
@@ -262,9 +309,13 @@ function report(): void {
     `rotY      ${f(view.pose.rotY)}`,
     `zoom      ${f(view.pose.zoom)}`,
     ``,
+    ...(game ? [`score     ${String(game.state.score).padStart(7)}`] : []),
+    ...(best > 0 ? [`best      ${String(best).padStart(7)}`] : []),
     phase === "idle"
       ? `drag to turn, click to flip, double-click to zoom in`
-      : `esc to come back out`,
+      : game?.state.over
+        ? `game over — space to go again, esc to come out`
+        : `space to jump, esc to come out`,
   ].join("\n");
 }
 report();

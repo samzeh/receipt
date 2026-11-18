@@ -4,7 +4,10 @@ import {
   type Material, Mesh, MeshPhysicalMaterial, RepeatWrapping, RGBAFormat, Shape,
   SRGBColorSpace, type Texture, Vector2, Vector3,
 } from "three";
-import { CHARACTER_PALETTE, CHARACTER_PIXELS } from "./character";
+import { CHARACTER_PALETTE } from "./character";
+import {
+  CHARACTER_SIZE, type CharacterPose, characterFrame, glyph, GOOSE_PALETTE, gooseFrame,
+} from "./sprites";
 import { mulberry32 } from "../text/rng";
 
 /**
@@ -59,6 +62,8 @@ export interface Card {
    * look at, 1 is the card you play on. The chip fades out as it goes.
    */
   setGameMix(t: number): void;
+  /** Draws one frame of the game onto the playfield layout. */
+  renderGame(scene: FaceScene): void;
   dispose(): void;
 }
 
@@ -259,7 +264,10 @@ export const GAME_LAYOUT: FaceLayout = {
   characterScale: 1,
   characterAt: { x: 36, y: 111 },
   bases: [0.93, 0.965, 0.99],
-  rises: [0.018, 0.011, 0.005],
+  // Dead flat. A running track with bumps in it reads as the ground moving
+  // under you rather than you moving over it, and the character's feet would
+  // leave the surface on every rise.
+  rises: [0, 0, 0],
   clouds: [
     { x: 24, y: 30, width: 56, seed: 0x3f21 },
     { x: 150, y: 46, width: 46, seed: 0x8ad4 },
@@ -300,10 +308,28 @@ export function lerpLayout(a: FaceLayout, b: FaceLayout, t: number): FaceLayout 
   };
 }
 
+/**
+ * What the game adds on top of a layout for one frame. Positions are texture
+ * pixels; `lift` is height above the ground line, so up is positive.
+ */
+export interface FaceScene {
+  pose: CharacterPose;
+  lift: number;
+  /** Pixels scrolled so far, for the ground and the clouds. */
+  scroll: number;
+  /** The geese: left edge, and whether their wings are up. */
+  geese: readonly { x: number; alert: boolean }[];
+  score: number;
+  over: boolean;
+  /** Best score so far, shown on the lose screen. */
+  best?: number;
+}
+
 export interface Face {
   texture: Texture;
-  /** Redraws the face at a layout. Cheap enough to run every frame. */
-  draw(layout: FaceLayout): void;
+  /** Redraws the face at a layout, with the game's frame on top if given.
+   *  Cheap enough to run every frame. */
+  draw(layout: FaceLayout, scene?: FaceScene): void;
 }
 
 export function makeFace(
@@ -319,7 +345,7 @@ export function makeFace(
   if (!ctx) return null;
   ctx.imageSmoothingEnabled = false;
 
-  const paint = (layout: FaceLayout): void => {
+  const paint = (layout: FaceLayout, scene?: FaceScene): void => {
 
   const unit = layout.block;
   const coarseCols = Math.floor(cols / unit);
@@ -336,8 +362,11 @@ export function makeFace(
     const bars = Math.max(2, Math.round(cloud.width / unit));
     const runs = cloudRuns(bars, cloud.seed);
     const px = (v: number): number => Math.round(v);
+    // In the game the sky drifts past, slower than the ground.
+    const period = cols + cloud.width;
+    const drift = scene ? ((((cloud.x - scene.scroll * 0.18) % period) + period) % period) - cloud.width : cloud.x;
     runs.forEach((run, i) => {
-      const x = cloud.x + run.x * unit;
+      const x = drift + run.x * unit;
       const y = cloud.y + run.y * unit;
       const w = run.width * unit;
       ctx.fillStyle = i === runs.length - 1 ? CLOUD_EDGE : CLOUD_BODY;
@@ -349,12 +378,14 @@ export function makeFace(
     });
   }
 
+  let horizon: Int32Array | null = null;
   LANDSCAPE.bands.forEach((band, i) => {
     const profile = pixelHorizon(coarseCols, coarseRows, {
       ...band,
       base: layout.bases[i]!,
       rise: layout.rises[i]!,
     });
+    if (i === 0) horizon = profile;
     ctx.fillStyle = band.color;
     for (let x = 0; x < coarseCols; x++) {
       const top = profile[x]!;
@@ -367,9 +398,74 @@ export function makeFace(
   });
 
   // The character last, so it stands in front of the hills.
+  /** Draws a string in the pixel font. Returns its width. */
+  const text = (
+    str: string,
+    x: number,
+    y: number,
+    scale: number,
+    colour: string,
+  ): number => {
+    ctx.fillStyle = colour;
+    const advance = 4 * scale;
+    let cursor = x;
+    for (const ch of str) {
+      if (ch === " ") {
+        cursor += advance;
+        continue;
+      }
+      const g = glyph(ch);
+      if (g) {
+        g.forEach((line, gy) => {
+          for (let gx = 0; gx < 3; gx++) {
+            if (line[gx] === "#") {
+              ctx.fillRect(cursor + gx * scale, y + gy * scale, scale, scale);
+            }
+          }
+        });
+      }
+      cursor += advance;
+    }
+    return cursor - x;
+  };
+
+  const textWidth = (str: string, scale: number): number => str.length * 4 * scale - scale;
+
+  const groundY = layout.characterAt.y + CHARACTER_SIZE.height * layout.characterScale;
+
+  if (scene && horizon) {
+    // Marks on the ground that scroll with the run. Without them a flat
+    // strip gives no sense of speed at all.
+    ctx.fillStyle = "#6aa83a";
+    const spacing = 53;
+    const marks = Math.ceil(cols / spacing) + 2;
+    for (let k = 0; k < marks; k++) {
+      const x = ((((k * spacing + (k * 17) % 29) - scene.scroll) % cols) + cols) % cols;
+      const col = Math.min(coarseCols - 1, Math.floor(x / unit));
+      const top = (horizon[col]! + 1) * unit;
+      if (top + unit <= rows) ctx.fillRect(Math.round(x), top, 2 * unit, unit);
+    }
+
+    // Geese, standing on the ground line. Bottom-aligned, so the taller
+    // alert pose raises its wings rather than sinking its feet.
+    for (const g of scene.geese) {
+      const sprite = gooseFrame(g.alert);
+      sprite.forEach((line, row) => {
+        for (let col = 0; col < line.length; col++) {
+          const colour = GOOSE_PALETTE[line[col]!];
+          if (!colour) continue;
+          ctx.fillStyle = colour;
+          ctx.fillRect(Math.round(g.x) + col, groundY - sprite.length + row, 1, 1);
+        }
+      });
+    }
+  }
+
   if (withCharacter) {
     const CHARS = "0123456789abcdefghijklmnopqrstuvwxyz";
-    CHARACTER_PIXELS.forEach((line, row) => {
+    const sprite = characterFrame(scene?.pose ?? "stand");
+    const liftPx = scene ? Math.round(scene.lift) : 0;
+    sprite.forEach((line, row) => {
       for (let col = 0; col < line.length; col++) {
         const colour = CHARACTER_PALETTE[CHARS.indexOf(line[col]!)];
         if (!colour) continue;
@@ -380,13 +476,56 @@ export function makeFace(
         const k = layout.characterScale;
         const x0 = Math.round(layout.characterAt.x + col * k);
         const x1 = Math.round(layout.characterAt.x + (col + 1) * k);
-        const y0 = Math.round(layout.characterAt.y + row * k);
-        const y1 = Math.round(layout.characterAt.y + (row + 1) * k);
+        const y0 = Math.round(layout.characterAt.y + row * k) - liftPx;
+        const y1 = Math.round(layout.characterAt.y + (row + 1) * k) - liftPx;
         ctx.fillRect(x0, y0, Math.max(1, x1 - x0), Math.max(1, y1 - y0));
       }
     });
   }
 
+
+    if (scene) {
+      // Score, top right.
+      const score = String(scene.score);
+      text(score, cols - 8 - textWidth(score, 2), 7, 2, "#2b3a4a");
+
+      if (scene.over) {
+        // A panel rather than text straight on the sky: the landscape runs
+        // underneath it and letters this small vanish against the hills.
+        const lines: [string, number, string][] = [
+          ["GOOSED", 4, "#b93939"],
+          [`SCORE ${scene.score}`, 2, "#2b3a4a"],
+          [scene.best === undefined ? "" : `BEST ${scene.best}`, 2, "#5f6b78"],
+          ["SPACE TO PLAY AGAIN", 2, "#2b3a4a"],
+        ];
+        const shown = lines.filter(([str]) => str.length > 0);
+        const gap = 7;
+        const height = shown.reduce((h, [, sc]) => h + 5 * sc + gap, -gap);
+        const widest = Math.max(...shown.map(([str, sc]) => textWidth(str, sc)));
+        const padX = 14;
+        const padY = 11;
+        const boxW = widest + padX * 2;
+        const boxH = height + padY * 2;
+        const boxX = Math.round((cols - boxW) / 2);
+        const boxY = Math.round((rows - boxH) / 2) - 8;
+
+        ctx.fillStyle = "rgba(20,28,38,0.22)";
+        ctx.fillRect(boxX + 3, boxY + 4, boxW, boxH);
+        ctx.fillStyle = "#f4f7fb";
+        ctx.fillRect(boxX, boxY, boxW, boxH);
+        ctx.fillStyle = "#2b3a4a";
+        ctx.fillRect(boxX, boxY, boxW, 2);
+        ctx.fillRect(boxX, boxY + boxH - 2, boxW, 2);
+        ctx.fillRect(boxX, boxY, 2, boxH);
+        ctx.fillRect(boxX + boxW - 2, boxY, 2, boxH);
+
+        let y = boxY + padY;
+        for (const [str, sc, colour] of shown) {
+          text(str, boxX + Math.round((boxW - textWidth(str, sc)) / 2), y, sc, colour);
+          y += 5 * sc + gap;
+        }
+      }
+    }
   };
 
   paint(DISPLAY_LAYOUT);
@@ -403,8 +542,8 @@ export function makeFace(
 
   return {
     texture: map,
-    draw(layout: FaceLayout): void {
-      paint(layout);
+    draw(layout: FaceLayout, scene?: FaceScene): void {
+      paint(layout, scene);
       map.needsUpdate = true;
     },
   };
@@ -739,6 +878,10 @@ export function createCard(): Card {
       chip.scale.setScalar(Math.max(0.001, 1 - mix));
       chipMat.opacity = 1 - mix;
       chip.visible = mix < 0.999;
+    },
+
+    renderGame(scene: FaceScene): void {
+      face?.draw(GAME_LAYOUT, scene);
     },
 
     dispose(): void {
