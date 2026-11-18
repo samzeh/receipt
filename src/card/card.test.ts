@@ -1,6 +1,6 @@
 import { Box3, Mesh, type MeshPhysicalMaterial, type Object3D } from "three";
 import { describe, expect, it, vi } from "vitest";
-import { CARD, CLOUD_SHAPE, cloudRuns, createCard, pixelHorizon } from "./card";
+import { CARD, CLOUD_SHAPE, cloudRuns, createCard, NAME_INK, pixelHorizon } from "./card";
 import { CHARACTER_PALETTE, CHARACTER_PIXELS } from "./character";
 
 function meshNamed(root: Object3D, name: string): Mesh {
@@ -259,6 +259,55 @@ describe("createCard", () => {
     const back = meshNamed(card.group, "back");
     expect(front.position.z).toBeGreaterThanOrEqual(CARD.thickness / 2);
     expect(back.position.z).toBeLessThanOrEqual(-CARD.thickness / 2);
+
+    card.dispose();
+  });
+
+  it("keeps the name in caps", () => {
+    expect(CARD.name).toBe(CARD.name.toUpperCase());
+  });
+
+  it("has a usable ink colour", () => {
+    expect(NAME_INK).toMatch(/^#[0-9a-f]{6}$/i);
+  });
+
+  it("keeps the name inside the card", () => {
+    // Only the edges are a rule. Whether it overlaps the character is a
+    // placement decision, and it currently does — the name crosses the
+    // figure's legs on purpose.
+    const nameHeight = CARD.nameWidth / 4;
+    const top = CARD.nameY + nameHeight / 2;
+    const bottom = CARD.nameY - nameHeight / 2;
+
+    expect(bottom).toBeGreaterThan(-CARD.height / 2 + 0.0005);
+    expect(top).toBeLessThan(CARD.height / 2 - 0.0005);
+    expect(CARD.nameX - CARD.nameWidth / 2).toBeGreaterThan(-CARD.width / 2 + 0.0005);
+    expect(CARD.nameX + CARD.nameWidth / 2).toBeLessThan(CARD.width / 2 - 0.0005);
+  });
+
+  it("keeps the name part metal, not fully", () => {
+    // At metalness 1 a tinted foil keeps its colour only in the reflection,
+    // so the name goes dark whenever the card turns away from a light.
+    // Holding some diffuse keeps it legible at every angle. How much is a
+    // matter of taste and gets tuned; that it is neither extreme is not.
+    const card = createCard();
+    const name = meshNamed(card.group, "name").material as MeshPhysicalMaterial;
+
+    expect(name.metalness).toBeGreaterThan(0);
+    expect(name.metalness).toBeLessThan(1);
+
+    card.dispose();
+  });
+
+  it("gives the name more sheen than the card itself has", () => {
+    // It has to catch the light where the card around it does not, or it
+    // reads as part of the artwork rather than as something applied to it.
+    const card = createCard();
+    const name = meshNamed(card.group, "name").material as MeshPhysicalMaterial;
+    const front = meshNamed(card.group, "front").material as MeshPhysicalMaterial;
+
+    expect(name.roughness).toBeLessThan(front.roughness);
+    expect(name.metalness).toBeGreaterThan(front.metalness);
 
     card.dispose();
   });

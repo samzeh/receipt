@@ -232,7 +232,15 @@ describe("letters", () => {
   });
 
   it("keeps every letter distinct", () => {
-    expect(new Set(Object.values(LETTERS).map((g) => g.join("/"))).size).toBe(26);
+    const alphabet = Object.entries(LETTERS).filter(([k]) => /^[A-Z]$/.test(k));
+    expect(alphabet).toHaveLength(26);
+    expect(new Set(alphabet.map(([, g]) => g.join("/"))).size).toBe(26);
+  });
+
+  it("carries the punctuation the card needs", () => {
+    // A name with a full stop in it silently loses the stop otherwise.
+    expect(glyph(".")).toBeDefined();
+    expect(glyph(".")).not.toBeNull();
   });
 
   it("looks up digits and letters, and nothing else", () => {

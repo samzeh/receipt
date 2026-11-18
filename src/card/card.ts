@@ -1,6 +1,6 @@
 import {
   BufferAttribute, type BufferGeometry, CanvasTexture, DataTexture, ExtrudeGeometry, Group,
-  LinearFilter, LinearMipmapLinearFilter, NearestFilter, ShapeGeometry,
+  LinearFilter, LinearMipmapLinearFilter, NearestFilter, PlaneGeometry, ShapeGeometry,
   type Material, Mesh, MeshPhysicalMaterial, RepeatWrapping, RGBAFormat, Shape,
   SRGBColorSpace, type Texture, Vector2, Vector3,
 } from "three";
@@ -8,6 +8,57 @@ import { CHARACTER_PALETTE } from "./character";
 import {
   CHARACTER_SIZE, type CharacterPose, characterFrame, glyph, GOOSE_PALETTE, gooseFrame,
 } from "./sprites";
+
+/** The colour the name is printed in. */
+export const NAME_INK = "#c6ea99";
+
+/**
+ * The name, rendered with a real typeface.
+ *
+ * Deliberately not the 3 x 5 pixel font: the landscape is pixel art because
+ * it is a drawing, but a name is typography, and a nine-character word at
+ * three pixels a letter is a smudge. Drawn large and minified, so the letters
+ * stay smooth while everything around them stays blocky.
+ */
+export function makeNameTexture(
+  name: string,
+  ink: string = NAME_INK,
+): { texture: Texture; aspect: number } | null {
+  if (typeof document === "undefined") return null;
+  const probe = document.createElement("canvas").getContext("2d");
+  if (!probe) return null;
+
+  const size = 72;
+  // Semibold rather than bold: at this size a heavy weight closes up the
+  // counters and the name turns into a bar.
+  const font = `600 ${size}px ui-sans-serif, system-ui, -apple-system, Helvetica, Arial, sans-serif`;
+  probe.font = font;
+  // Barely any tracking. Caps set tight read as a unit; spaced out they read
+  // as separate letters.
+  const tracking = size * 0.012;
+  const width = Math.ceil(probe.measureText(name).width + tracking * (name.length - 1));
+
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, width + size * 0.3);
+  canvas.height = Math.round(size * 1.35);
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return null;
+
+  ctx.font = font;
+  ctx.textBaseline = "middle";
+  ctx.fillStyle = ink;
+  let x = size * 0.15;
+  for (const ch of name) {
+    ctx.fillText(ch, x, canvas.height / 2);
+    x += ctx.measureText(ch).width + tracking;
+  }
+
+  const t = new CanvasTexture(canvas);
+  t.colorSpace = SRGBColorSpace;
+  t.anisotropy = 8;
+  t.needsUpdate = true;
+  return { texture: t, aspect: canvas.width / canvas.height };
+}
 import { mulberry32 } from "../text/rng";
 
 /**
@@ -33,10 +84,23 @@ export const CARD = {
   chipRadius: 0.0013,
   /** Measured from the card's centre: right of centre, a little below the
    *  midline. */
-  chipX: 0.023,
-  chipY: -0.003,
+  chipX: 0.027,
+  chipY: -0.00689,
   /** Chips stand very slightly proud of the card face. */
   chipProud: 0.00004,
+
+  /**
+   * Printed name, low and to the right of the character.
+   *
+   * Its height follows from its width, and under the character's feet there
+   * is only about 5.6mm of grass — not enough for a name this size. Clear of
+   * the character's columns there is nothing above it, so it can sit as high
+   * as it likes.
+   */
+  name: "SAMUEL H.",
+  nameWidth: 0.03,
+  nameX: -0.0246,
+  nameY: -0.02079,
 } as const;
 
 /**
@@ -858,6 +922,37 @@ export function createCard(): Card {
   // and a contact plate in the way of a running character reads as a bug.
   chipMat.transparent = true;
 
+  // The name, printed. It sits on its own plane only so it can be drawn at a
+  // resolution the face texture does not have — the material matches the
+  // printed card either side of it, so it reads as ink, not as an overlay.
+  const nameMap = makeNameTexture(CARD.name);
+  // Tinted foil rather than ink: partly metallic, so the letters take their
+  // colour from the map and their brightness from whatever is around them.
+  // Not fully metallic — at metalness 1 the colour survives only in the
+  // reflection and the name goes dark whenever the card turns away from a
+  // light. Holding some diffuse keeps it legible at every angle.
+  const nameMat = new MeshPhysicalMaterial({
+    color: 0xffffff,
+    map: nameMap?.texture ?? null,
+    metalness: 0.3,
+    roughness: 0.26,
+    clearcoat: 0,
+    clearcoatRoughness: 0.14,
+    transparent: true,
+    depthWrite: false,
+    envMapIntensity: 1.25,
+  });
+  const nameHeight = CARD.nameWidth / (nameMap?.aspect ?? 6);
+  const nameMesh = new Mesh(new PlaneGeometry(CARD.nameWidth, nameHeight), nameMat);
+  nameMesh.name = "name";
+  nameMesh.visible = nameMap !== null;
+  // Clear of the printed face by more than the face is clear of the
+  // substrate, and drawn after everything else: the name is the last thing
+  // applied to a card, and nothing on it should ever cross in front.
+  nameMesh.position.set(CARD.nameX, CARD.nameY, CARD.thickness / 2 + 2.4e-5);
+  nameMesh.renderOrder = 10;
+  group.add(nameMesh);
+
   const anchors: CardAnchors = {
     chip: new Vector3(CARD.chipX, CARD.chipY, CARD.thickness / 2),
     face: new Vector3(0, 0, 1),
@@ -878,6 +973,9 @@ export function createCard(): Card {
       chip.scale.setScalar(Math.max(0.001, 1 - mix));
       chipMat.opacity = 1 - mix;
       chip.visible = mix < 0.999;
+      // The name belongs to the card, not to the game being played on it.
+      nameMat.opacity = 1 - mix;
+      nameMesh.visible = nameMap !== null && mix < 0.999;
     },
 
     renderGame(scene: FaceScene): void {
@@ -896,6 +994,7 @@ export function createCard(): Card {
       brushed.dispose();
       face?.texture.dispose();
       backFace?.texture.dispose();
+      nameMap?.texture.dispose();
       chipMaps?.map.dispose();
       chipMaps?.roughnessMap.dispose();
       for (const m of materials) m.dispose();

@@ -75,6 +75,9 @@ describe("Cloth with bending", () => {
     expect(Math.abs(c.pos[mid * 3 + 2]! - c.pos[edge * 3 + 2]!)).toBeLessThan(5e-4);
   });
 
+  // Twenty seconds, not the default five. This simulates two cantilevers to
+  // convergence and takes six on its own; under a full parallel run it tips
+  // past the default and fails for no reason anyone can act on.
   it("droops the same at two mesh resolutions of the same physical size", () => {
     // An 80mm square plate clamped along its left edge, at 12x12 and 23x23.
     // A hanging curtain would not exercise bending at all, so load it sideways.
@@ -88,7 +91,7 @@ describe("Cloth with bending", () => {
     };
     const coarse = droop(12), fine = droop(23);
     expect(Math.abs(fine - coarse) / Math.abs(coarse)).toBeLessThan(0.15);
-  });
+  }, 20_000);
 
   it("keeps a 200-row strip inextensible", { timeout: 30_000 }, () => {
     const rows = 200;
