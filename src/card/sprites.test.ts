@@ -238,7 +238,9 @@ describe("letters", () => {
   });
 
   it("carries the punctuation the card needs", () => {
-    // A name with a full stop in it silently loses the stop otherwise.
+    // Anything drawn with this font loses a character it lacks, silently —
+    // no error, just a gap. This regressed once already, when the table was
+    // pasted back from a copy that stopped at Z.
     expect(glyph(".")).toBeDefined();
     expect(glyph(".")).not.toBeNull();
   });

@@ -251,6 +251,8 @@ export const LETTERS: Record<string, readonly string[]> = {
   X: ["#.#", "#.#", ".#.", "#.#", "#.#"],
   Y: ["#.#", "#.#", ".#.", ".#.", ".#."],
   Z: ["###", "..#", ".#.", "#..", "###"],
+  ".": ["...", "...", "...", "...", ".#."],
+  "-": ["...", "...", "###", "...", "..."],
 };
 
 /** The glyph for a character, or null for anything the font lacks. */

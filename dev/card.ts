@@ -1,6 +1,10 @@
 import { Raycaster, Vector2 } from "three";
 import { createStage, defaultStageDeps } from "../src/core/stage";
 import { CARD, createCard } from "../src/card/card";
+import { createSticker } from "../src/card/sticker";
+import stickerUrl from "../src/card/image/sticker.png";
+import sticker1Url from "../src/card/image/sticker1.png";
+import sticker2Url from "../src/card/image/sticker2.png";
 import { GAME_LAYOUT } from "../src/card/card";
 import { createGame, type Game } from "../src/card/game";
 import {
@@ -50,7 +54,6 @@ let lastX = 0;
 let lastY = 0;
 let travelled = 0;
 let lastClickAt = 0;
-let since = 0;
 /** 0 shows the display face, 1 the playfield. Chased, not tweened, so it can
  *  be redirected mid-flight when you come straight back out. */
 let mix = 0;
@@ -118,13 +121,6 @@ const stage = createStage(
         });
       }
       card.group.rotation.set(view.pose.rotX, view.pose.rotY, 0);
-      // Live pose readout, throttled: handy for reading a pose you like back
-      // into the source as the new resting position.
-      since += dt;
-      if (since > 0.1) {
-        since = 0;
-        report();
-      }
     },
     resize: () => frameCard(),
     error: (e) => console.warn("[card]", e.code, e.message),
@@ -134,6 +130,38 @@ const stage = createStage(
 if (!stage) throw new Error("no webgl");
 
 stage.scene.add(card.group);
+
+// --- stickers on the back ---------------------------------------------------
+
+interface Placement {
+  url: string;
+  x: number;
+  y: number;
+  width: number;
+  rotation: number;
+}
+
+/** Where each sticker sits on the back, in metres from the card's centre. */
+const PLACED: Placement[] = [
+  { url: stickerUrl, x: -0.0258, y: -0.0096, width: 0.022, rotation: -0.2615 },
+  { url: sticker1Url, x: 0.0304, y: 0.0104, width: 0.022, rotation: 0.5184 },
+  { url: sticker2Url, x: 0.0304, y: -0.0148, width: 0.014, rotation: -0.0215 },
+];
+
+async function applyStickers(): Promise<void> {
+  for (const spec of PLACED) {
+    const art = new Image();
+    art.src = spec.url;
+    // decode() rather than onload: it resolves once the pixels are ready to
+    // read, which is what the alpha pass needs.
+    await art.decode();
+
+    const sticker = createSticker(art, { width: spec.width, rotation: spec.rotation });
+    if (sticker) card.addSticker(sticker, spec.x, spec.y);
+  }
+}
+
+void applyStickers().catch((e: unknown) => console.warn('[sticker]', e));
 
 // --- framing ----------------------------------------------------------------
 
@@ -168,10 +196,8 @@ function enter(): void {
     moveTo({ zoom: GAME_ZOOM }, ZOOM_TIME, () => {
       phase = "ready";
       startGame();
-      report();
     });
   });
-  report();
 }
 
 function exit(): void {
@@ -184,12 +210,7 @@ function exit(): void {
   // A full turn backwards while the camera pulls back, landing on the resting
   // pose. The spin is the point — without it the exit is only a zoom, and
   // there is nothing to watch.
-  moveTo(
-    { rotX: REST_X, rotY: nearestFront(view.pose.rotY) - 2 * Math.PI, zoom: REST_ZOOM },
-    EXIT_TIME,
-    report,
-  );
-  report();
+  moveTo({ rotX: REST_X, rotY: nearestFront(view.pose.rotY) - 2 * Math.PI, zoom: REST_ZOOM }, EXIT_TIME);
 }
 
 // --- pointer ----------------------------------------------------------------
@@ -291,31 +312,3 @@ addEventListener("keydown", (e) => {
     act();
   }
 });
-
-// --- hud --------------------------------------------------------------------
-
-const mm = (m: number): string => `${(m * 1000).toFixed(2)}mm`;
-const hud = document.createElement("pre");
-hud.id = "hud";
-document.body.appendChild(hud);
-
-function report(): void {
-  const f = (v: number): string => v.toFixed(3).padStart(7);
-  hud.textContent = [
-    `card        ${mm(CARD.width)} x ${mm(CARD.height)} (ISO ID-1)`,
-    `phase       ${phase}`,
-    ``,
-    `rotX      ${f(view.pose.rotX)}`,
-    `rotY      ${f(view.pose.rotY)}`,
-    `zoom      ${f(view.pose.zoom)}`,
-    ``,
-    ...(game ? [`score     ${String(game.state.score).padStart(7)}`] : []),
-    ...(best > 0 ? [`best      ${String(best).padStart(7)}`] : []),
-    phase === "idle"
-      ? `drag to turn, click to flip, double-click to zoom in`
-      : game?.state.over
-        ? `game over — space to go again, esc to come out`
-        : `space to jump, esc to come out`,
-  ].join("\n");
-}
-report();

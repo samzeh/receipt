@@ -5,6 +5,7 @@ import {
   SRGBColorSpace, type Texture, Vector2, Vector3,
 } from "three";
 import { CHARACTER_PALETTE } from "./character";
+import type { Sticker } from "./sticker";
 import {
   CHARACTER_SIZE, type CharacterPose, characterFrame, glyph, GOOSE_PALETTE, gooseFrame,
 } from "./sprites";
@@ -128,6 +129,11 @@ export interface Card {
   setGameMix(t: number): void;
   /** Draws one frame of the game onto the playfield layout. */
   renderGame(scene: FaceScene): void;
+  /**
+   * Sticks something to the back of the card. Coordinates are as seen
+   * looking at the back, so x runs left to right from that side.
+   */
+  addSticker(sticker: Sticker, x: number, y: number): void;
   dispose(): void;
 }
 
@@ -953,6 +959,16 @@ export function createCard(): Card {
   nameMesh.renderOrder = 10;
   group.add(nameMesh);
 
+  // Stickers live in their own group, turned to face out of the back. Inside
+  // it, x runs the way it does when you are looking at the back — which is
+  // the way you think about where a sticker goes.
+  const stickers = new Group();
+  stickers.name = "stickers";
+  stickers.rotation.y = Math.PI;
+  stickers.position.z = -(CARD.thickness / 2 + 1.4e-5);
+  group.add(stickers);
+  const applied: Sticker[] = [];
+
   const anchors: CardAnchors = {
     chip: new Vector3(CARD.chipX, CARD.chipY, CARD.thickness / 2),
     face: new Vector3(0, 0, 1),
@@ -982,6 +998,15 @@ export function createCard(): Card {
       face?.draw(GAME_LAYOUT, scene);
     },
 
+    addSticker(sticker: Sticker, x: number, y: number): void {
+      sticker.mesh.position.set(x, y, 0);
+      // Stacked by arrival, so a later sticker sits over an earlier one the
+      // way it would if you actually put it there.
+      sticker.mesh.renderOrder = 1 + applied.length;
+      stickers.add(sticker.mesh);
+      applied.push(sticker);
+    },
+
     dispose(): void {
       const geometries = new Set<BufferGeometry>();
       const materials = new Set<Material>();
@@ -995,6 +1020,8 @@ export function createCard(): Card {
       face?.texture.dispose();
       backFace?.texture.dispose();
       nameMap?.texture.dispose();
+      for (const sticker of applied) sticker.dispose();
+      applied.length = 0;
       chipMaps?.map.dispose();
       chipMaps?.roughnessMap.dispose();
       for (const m of materials) m.dispose();
